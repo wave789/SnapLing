@@ -1,0 +1,16 @@
+[Desktop Entry]
+Type=Application
+Name=SnapLing
+Comment=截图、离线 OCR 和原地翻译
+Exec=snapling
+Icon=snapling
+Categories=Graphics;Utility;
+Terminal=false
+StartupNotify=false
+Actions=Capture;OCR;
+[Desktop Action Capture]
+Name=截图
+Exec=snapling --capture
+[Desktop Action OCR]
+Name=OCR 截图
+Exec=snapling --ocr

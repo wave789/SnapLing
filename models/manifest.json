@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "models": [
+    {
+      "language": "eng",
+      "file": "tessdata/eng.traineddata",
+      "engine": "Tesseract LSTM",
+      "package": "tesseract-ocr-eng",
+      "version": "4.1.0-2build1",
+      "license": "Apache-2.0",
+      "upstream": "https://github.com/tesseract-ocr/tessdata_fast",
+      "distribution": "https://packages.ubuntu.com/resolute/tesseract-ocr-eng",
+      "bytes": 4113088,
+      "sha256": "7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2"
+    },
+    {
+      "language": "chi_sim",
+      "file": "tessdata/chi_sim.traineddata",
+      "engine": "Tesseract LSTM",
+      "package": "tesseract-ocr-chi-sim",
+      "version": "4.1.0-2build1",
+      "license": "Apache-2.0",
+      "upstream": "https://github.com/tesseract-ocr/tessdata_fast",
+      "distribution": "https://packages.ubuntu.com/resolute/tesseract-ocr-chi-sim",
+      "bytes": 2469156,
+      "sha256": "a5fcb6f0db1e1d6d8522f39db4e848f05984669172e584e8d76b6b3141e1f730"
+    }
+  ]
+}

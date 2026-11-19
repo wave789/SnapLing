@@ -1,0 +1,9 @@
+build*/
+.deps/
+dist/
+*.user
+*.snapling
+*.log
+__pycache__/
+.idea/
+.openidea/

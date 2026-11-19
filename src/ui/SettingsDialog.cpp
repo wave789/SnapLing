@@ -1,0 +1,299 @@
+#include "SettingsDialog.h"
+#include "ocr/OcrEngine.h"
+#include "platform/Autostart.h"
+#include "translation/TranslationProvider.h"
+#include <QCheckBox>
+#include <QComboBox>
+#include <QDialogButtonBox>
+#include <QDir>
+#include <QDoubleSpinBox>
+#include <QFileDialog>
+#include <QFormLayout>
+#include <QHBoxLayout>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QKeySequenceEdit>
+#include <QLabel>
+#include <QLineEdit>
+#include <QMessageBox>
+#include <QPushButton>
+#include <QScrollArea>
+#include <QSpinBox>
+#include <QTabWidget>
+#include <QVBoxLayout>
+namespace SnapLing {
+SettingsDialog::SettingsDialog(Settings &s, ProviderConfig &runtime, QWidget *parent) : QDialog(parent) {
+    setWindowTitle("SnapLing 设置");
+    resize(660, 560);
+    auto *layout = new QVBoxLayout(this);
+    auto *tabs = new QTabWidget;
+    layout->addWidget(tabs);
+    auto page = [&](QString name) {
+        auto *w = new QWidget;
+        auto *f = new QFormLayout(w);
+        f->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+        auto *view = new QScrollArea;
+        view->setWidgetResizable(true);
+        view->setWidget(w);
+        tabs->addTab(view, name);
+        return f;
+    };
+    auto *general = page("通用");
+    auto *theme = new QComboBox;
+    theme->addItems({"跟随系统", "浅色", "深色"});
+    theme->setCurrentIndex(s.value("general/theme", 0).toInt());
+    general->addRow("主题", theme);
+    auto *startup = new QCheckBox("登录后自动启动");
+    startup->setChecked(s.value("general/startup", false).toBool());
+    general->addRow(startup);
+    auto *background = new QCheckBox("关闭主窗口后继续运行");
+    background->setChecked(s.value("general/background", true).toBool());
+    general->addRow(background);
+    auto *autoCopy = new QCheckBox("截图后自动复制图片");
+    autoCopy->setChecked(s.value("general/autoCopy", false).toBool());
+    general->addRow(autoCopy);
+    auto *closeCopy = new QCheckBox("复制后关闭编辑器");
+    closeCopy->setChecked(s.value("general/closeAfterCopy", false).toBool());
+    general->addRow(closeCopy);
+    auto *saveDir = new QLineEdit(s.value("general/saveDir", QDir::homePath() + "/Pictures").toString());
+    general->addRow("保存目录", saveDir);
+    auto *format = new QComboBox;
+    format->addItems({"PNG", "JPG"});
+    format->setCurrentText(s.value("general/format", "PNG").toString());
+    general->addRow("默认格式", format);
+    auto *quality = new QSpinBox;
+    quality->setRange(1, 100);
+    quality->setValue(s.value("general/quality", 92).toInt());
+    general->addRow("JPG 质量", quality);
+    auto *jpgBg = new QLineEdit(s.value("general/jpegBackground", "#ffffff").toString());
+    general->addRow("JPG 背景色", jpgBg);
+    auto *history = new QCheckBox("启用历史（默认关闭；仅在导出时记录）");
+    history->setChecked(s.value("history/enabled", false).toBool());
+    general->addRow(history);
+    auto *hotkeys = page("快捷键");
+    auto *key = new QKeySequenceEdit(QKeySequence(s.value("hotkey/capture", "Ctrl+Alt+A").toString()));
+    hotkeys->addRow("截图", key);
+    auto extraKeys = std::make_shared<QMap<QString, QKeySequenceEdit *>>();
+    const QList<QPair<QString, QString>> hotkeyNames{
+        {"full", "全屏"}, {"window", "窗口"}, {"delay", "延时 3 秒"}, {"ocr", "OCR"}, {"translate", "翻译"}};
+    for (auto [id, label] : hotkeyNames) {
+        auto *edit = new QKeySequenceEdit(QKeySequence(s.value("hotkey/" + id).toString()));
+        (*extraKeys)[id] = edit;
+        hotkeys->addRow(label + "（可留空）", edit);
+    }
+
+    auto *hint = new QLabel("Wayland 快捷键由系统授权。系统不支持 Portal 时，在 GNOME 设置中绑定：\nsnapling "
+                            "--capture\nsnapling --full / --window / --ocr / --translate / --delay 3");
+    hint->setWordWrap(true);
+    hint->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    hotkeys->addRow(hint);
+    auto *ocr = page("OCR");
+    ocr->addRow(new QLabel("引擎：Tesseract 5 LSTM · 完全离线 · 按需初始化"));
+    auto *modelPath = new QLineEdit(s.value("ocr/path", findTessdata()).toString());
+    auto *choose = new QPushButton("选择模型目录…");
+    ocr->addRow("模型目录", modelPath);
+    ocr->addRow(choose);
+    connect(choose, &QPushButton::clicked, this, [this, modelPath] {
+        auto path = QFileDialog::getExistingDirectory(this, "选择含 traineddata 的目录", modelPath->text());
+        if (!path.isEmpty())
+            modelPath->setText(path);
+    });
+    auto *langs = new QComboBox;
+    langs->addItems({"chi_sim+eng", "eng", "chi_sim"});
+    langs->setCurrentText(s.value("ocr/languages", "chi_sim+eng").toString());
+    ocr->addRow("语言", langs);
+    auto *hash = new QPushButton("查看模型大小与 SHA256");
+    ocr->addRow(hash);
+    connect(hash, &QPushButton::clicked, this, [this, modelPath] {
+        QMessageBox::information(this, "本地模型完整性", modelInfo(modelPath->text()));
+    });
+    auto *ai = page("AI 翻译");
+    auto *preset = new QComboBox;
+    preset->addItems({"本地 Ollama", "OpenAI 兼容服务"});
+    ai->addRow("服务类型", preset);
+    auto *name = new QLineEdit(runtime.name), *url = new QLineEdit(runtime.baseUrl),
+         *model = new QLineEdit(runtime.model), *env = new QLineEdit(runtime.keyEnv),
+         *secret = new QLineEdit(runtime.sessionKey), *language = new QLineEdit(runtime.targetLanguage);
+    secret->setEchoMode(QLineEdit::Password);
+    secret->setPlaceholderText("本次运行有效；持久密钥请使用环境变量");
+    ai->addRow("名称", name);
+    ai->addRow("Base URL", url);
+    ai->addRow("模型", model);
+    ai->addRow("密钥环境变量", env);
+    ai->addRow("临时 API Key", secret);
+    ai->addRow("目标语言", language);
+    connect(preset, qOverload<int>(&QComboBox::activated), this, [=](int index) {
+        name->setText(preset->currentText());
+        if (index == 0) {
+            url->setText("http://127.0.0.1:11434/v1");
+            model->setText("qwen3.5:4b");
+        } else {
+            url->clear();
+            model->clear();
+        }
+    });
+    auto *timeout = new QSpinBox;
+    timeout->setRange(1, 600);
+    timeout->setValue(runtime.timeoutSeconds);
+    ai->addRow("超时（秒）", timeout);
+    auto *tokens = new QSpinBox;
+    tokens->setRange(128, 65536);
+    tokens->setValue(runtime.maxTokens);
+    ai->addRow("最大输出 token", tokens);
+    auto *temp = new QDoubleSpinBox;
+    temp->setRange(0, 2);
+    temp->setSingleStep(.1);
+    temp->setValue(runtime.temperature);
+    ai->addRow("Temperature", temp);
+    auto *json = new QCheckBox("发送 response_format: json_object");
+    json->setChecked(runtime.structuredJson);
+    ai->addRow(json);
+    auto config = [=] {
+        ProviderConfig p;
+        p.name = name->text().trimmed();
+        p.baseUrl = url->text().trimmed();
+        p.model = model->text().trimmed();
+        p.keyEnv = env->text().trimmed();
+        p.sessionKey = secret->text();
+        p.targetLanguage = language->text().trimmed();
+        p.timeoutSeconds = timeout->value();
+        p.maxTokens = tokens->value();
+        p.temperature = temp->value();
+        p.structuredJson = json->isChecked();
+        return p;
+    };
+    auto profiles =
+        std::make_shared<QJsonArray>(QJsonDocument::fromJson(s.value("ai/profiles").toByteArray()).array());
+    auto *profilesBox = new QComboBox;
+    auto refreshProfiles = [=] {
+        profilesBox->clear();
+        for (auto v : *profiles)
+            profilesBox->addItem(v.toObject()["name"].toString());
+    };
+    refreshProfiles();
+    ai->insertRow(0, "已保存供应商", profilesBox);
+    connect(profilesBox, qOverload<int>(&QComboBox::activated), this, [=](int i) {
+        if (i < 0 || i >= profiles->size())
+            return;
+        auto o = profiles->at(i).toObject();
+        name->setText(o["name"].toString());
+        url->setText(o["url"].toString());
+        model->setText(o["model"].toString());
+        env->setText(o["keyEnv"].toString());
+        language->setText(o["language"].toString());
+        timeout->setValue(o["timeout"].toInt(90));
+        tokens->setValue(o["tokens"].toInt(4096));
+        temp->setValue(o["temperature"].toDouble(.1));
+        json->setChecked(o["json"].toBool(true));
+        secret->clear();
+    });
+    auto *profileButtons = new QWidget;
+    auto *profileRow = new QHBoxLayout(profileButtons);
+    profileRow->setContentsMargins(0, 0, 0, 0);
+    auto *remember = new QPushButton("添加 / 更新供应商");
+    auto *forget = new QPushButton("删除所选供应商");
+    profileRow->addWidget(remember);
+    profileRow->addWidget(forget);
+    ai->addRow(profileButtons);
+    connect(remember, &QPushButton::clicked, this, [=] {
+        auto p = config();
+        if (p.name.isEmpty())
+            return;
+        QJsonObject o{{"name", p.name},
+                      {"url", p.baseUrl},
+                      {"model", p.model},
+                      {"keyEnv", p.keyEnv},
+                      {"language", p.targetLanguage},
+                      {"timeout", p.timeoutSeconds},
+                      {"tokens", p.maxTokens},
+                      {"temperature", p.temperature},
+                      {"json", p.structuredJson}};
+        int found = -1;
+        for (int i = 0; i < profiles->size(); ++i)
+            if (profiles->at(i).toObject()["name"] == p.name)
+                found = i;
+        if (found >= 0)
+            (*profiles)[found] = o;
+        else
+            profiles->append(o);
+        refreshProfiles();
+        profilesBox->setCurrentText(p.name);
+    });
+    connect(forget, &QPushButton::clicked, this, [=] {
+        int i = profilesBox->currentIndex();
+        if (i >= 0 && i < profiles->size()) {
+            profiles->removeAt(i);
+            refreshProfiles();
+        }
+    });
+    auto *test = new QPushButton("测试连接");
+    ai->addRow(test);
+    auto *provider = new OpenAiTranslationProvider(this);
+    connect(test, &QPushButton::clicked, this, [provider, config] { provider->testConnection(config()); });
+    connect(provider, &OpenAiTranslationProvider::connectionResult, this,
+            [this](bool, QString message) { QMessageBox::information(this, "连接测试", message); });
+    auto *privacy =
+        new QLabel("本地地址与远程服务在发送前分别说明。截图文本不会写入日志；密钥不写入配置文件。");
+    privacy->setWordWrap(true);
+    ai->addRow(privacy);
+    auto *performance = page("性能");
+    auto *cache = new QCheckBox("缓存 OCR 模型以加速连续识别");
+    cache->setChecked(s.value("ocr/cache", true).toBool());
+    performance->addRow(cache);
+    auto *days = new QSpinBox;
+    days->setRange(1, 3650);
+    days->setValue(s.value("history/days", 30).toInt());
+    performance->addRow("历史保留天数", days);
+    auto *limit = new QSpinBox;
+    limit->setRange(16, 102400);
+    limit->setValue(s.value("history/megabytes", 512).toInt());
+    performance->addRow("历史空间 MiB", limit);
+    performance->addRow(
+        new QLabel("快速屏幕共享需要在主界面主动授权；退出自动停止。\n共享仅缓存最新一帧，不保存屏幕流。"));
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel);
+    layout->addWidget(buttons);
+    connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+    connect(buttons, &QDialogButtonBox::accepted, this,
+            [&, this, config, extraKeys, profiles, startup, theme, background, autoCopy, closeCopy, saveDir,
+             format, quality, jpgBg, history, key, modelPath, langs, cache, days, limit] {
+                if (key->keySequence().count() != 1) {
+                    QMessageBox::warning(this, "快捷键无效", "请输入单组快捷键");
+                    return;
+                }
+                if (!QColor(jpgBg->text()).isValid()) {
+                    QMessageBox::warning(this, "颜色无效", "请输入有效的背景颜色");
+                    return;
+                }
+                if (startup->isChecked() != s.value("general/startup", false).toBool()) {
+                    QString error;
+                    if (!Autostart::setEnabled(startup->isChecked(), error)) {
+                        QMessageBox::warning(this, "自动启动", error);
+                        return;
+                    }
+                }
+                s.set("general/startup", startup->isChecked());
+                s.set("ai/profiles", QJsonDocument(*profiles).toJson(QJsonDocument::Compact));
+                for (auto it = extraKeys->cbegin(); it != extraKeys->cend(); ++it)
+                    s.set("hotkey/" + it.key(),
+                          it.value()->keySequence().toString(QKeySequence::PortableText));
+                runtime = config();
+                s.saveProvider(runtime);
+                s.set("general/theme", theme->currentIndex());
+                s.set("general/background", background->isChecked());
+                s.set("general/autoCopy", autoCopy->isChecked());
+                s.set("general/closeAfterCopy", closeCopy->isChecked());
+                s.set("general/saveDir", saveDir->text());
+                s.set("general/format", format->currentText());
+                s.set("general/quality", quality->value());
+                s.set("general/jpegBackground", jpgBg->text());
+                s.set("history/enabled", history->isChecked());
+                s.set("hotkey/capture", key->keySequence().toString(QKeySequence::PortableText));
+                s.set("ocr/path", modelPath->text());
+                s.set("ocr/languages", langs->currentText());
+                s.set("ocr/cache", cache->isChecked());
+                s.set("history/days", days->value());
+                s.set("history/megabytes", limit->value());
+                accept();
+            });
+}
+} // namespace SnapLing

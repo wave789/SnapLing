@@ -1,0 +1,8 @@
+FROM ubuntu:24.04
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential cmake ninja-build pkg-config qt6-base-dev qt6-wayland qt6-svg-dev \
+    libtesseract-dev libpipewire-0.3-dev libx11-dev libxrandr-dev libxcb1-dev \
+    libxkbcommon-dev libxcb-cursor0 libzxing-dev xvfb xauth xdotool fonts-noto-cjk python3 \
+    && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends file && rm -rf /var/lib/apt/lists/*

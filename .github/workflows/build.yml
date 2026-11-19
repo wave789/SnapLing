@@ -1,0 +1,51 @@
+name: Build and test
+on: [push, pull_request, workflow_dispatch]
+jobs:
+  ubuntu:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Dependencies (Qt 6.4 baseline)
+        run: sudo apt-get update && sudo apt-get install -y ninja-build pkg-config libxkbcommon-dev qt6-base-dev qt6-wayland qt6-svg-dev libtesseract-dev libpipewire-0.3-dev libx11-dev libxrandr-dev libxcb1-dev libzxing-dev xvfb xauth xdotool fonts-noto-cjk
+      - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+      - run: cmake --build build --parallel 4
+      - run: ctest --test-dir build --output-on-failure
+      - name: Real X11 desktop integration
+        run: tools/test-desktop.sh -o build/desktop-tests.log,txt
+      - name: DEB
+        run: cd build && cpack -G DEB
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ubuntu-24.04
+          path: |
+            build/*.deb
+            build/desktop-tests.log
+            test-artifacts/*
+  windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.5.3'
+          arch: win64_msvc2019_64
+          cache: true
+      - name: Native OCR
+        shell: pwsh
+        run: vcpkg install tesseract:x64-windows
+      - name: Configure
+        shell: pwsh
+        run: cmake -S . -B build -A x64 -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+      - run: cmake --build build --config Release --parallel 4
+      - name: Tests
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: ctest --test-dir build -C Release --output-on-failure
+      - name: Deploy Qt and OCR runtime
+        shell: pwsh
+        run: packaging/windows/deploy.ps1 -QtBin "$env:QT_ROOT_DIR/bin"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: dist/SnapLing-Windows-x64.zip
