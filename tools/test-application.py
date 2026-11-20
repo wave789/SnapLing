@@ -14,15 +14,18 @@ with tempfile.TemporaryDirectory(prefix='snapling-app-e2e-') as tmp:
         target=subprocess.Popen([fixture,'--target-only'],env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True);processes.append(target)
         target_window=ctl('search','--sync','--name','^SnapLing real desktop target$').splitlines()[0];time.sleep(.3)
         subprocess.run([app,'--full'],env=env,check=True,timeout=5)
+        quick=ctl('search','--sync','--name','^SnapLing · 即时截图编辑$').splitlines()[0]
+        ctl('key','--window',target_window,'Escape')
+        ctl('windowfocus',quick);ctl('key','Return')
         window=ctl('search','--sync','--name','^SnapLing · 截图编辑$').splitlines()[0]
         ctl('key','--window',target_window,'Escape');ctl('windowfocus',window)
         ctl('mousemove','--window',window,'170','18');ctl('click','1')
         ctl('mousemove','--window',window,'320','330');ctl('mousedown','1');ctl('mousemove','--window',window,'620','400');ctl('mouseup','1')
         ctl('key','--window',window,'ctrl+s')
         dialog=ctl('search','--sync','--name','^保存图片$').splitlines()[0]
-        ctl('windowfocus',dialog);ctl('key','--window',dialog,'ctrl+a')
+        ctl('windowfocus',dialog);ctl('key','alt+n');ctl('key','ctrl+a')
         output=pathlib.Path(tmp)/'application-output.png'
-        ctl('type','--window',dialog,'--clearmodifiers',str(output));time.sleep(.2)
+        ctl('type','--clearmodifiers',str(output));time.sleep(.2)
         ctl('key','Return')
         deadline=time.monotonic()+5
         while not output.exists() and time.monotonic()<deadline:time.sleep(.05)

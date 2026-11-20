@@ -145,19 +145,18 @@ Application::Application(QObject *p)
             return;
         }
         qInfo("capture_ms=%lld trigger_to_pixels_ms=%lld", frame.captureMs, captureTimer.elapsed());
-        if (pendingMode == CaptureMode::FullScreen || frame.selectionComplete) {
-            capturing = false;
-            restoreWindows();
-            edit(frame.image, pendingOcr, pendingTranslation);
-            return;
-        }
         if (pendingMode == CaptureMode::Window && !backend->hasWindowPicking())
             status->setText("Wayland 窗口由系统选择器决定；若系统未提供窗口选择，可在冻结图像上框选。");
-        auto *overlay = new SelectionOverlay(std::move(frame), pendingMode);
-        connect(overlay, &SelectionOverlay::accepted, this, [this](QImage image) {
+        auto session = std::make_shared<EditorSession>(QImage(), settings, config);
+        auto *overlay = new SelectionOverlay(std::move(frame), pendingMode, nullptr, session);
+        connect(overlay, &SelectionOverlay::advancedRequested, this, [this](auto session) {
             capturing = false;
             restoreWindows();
-            edit(std::move(image), pendingOcr, pendingTranslation);
+            edit(std::move(session));
+        });
+        connect(overlay, &SelectionOverlay::quickEditingStarted, this, [this, overlay] {
+            if (pendingOcr || pendingTranslation)
+                overlay->runOcr(pendingTranslation);
         });
         connect(overlay, &SelectionOverlay::cancelled, this, [this] {
             capturing = false;
@@ -197,10 +196,10 @@ Application::Application(QObject *p)
 Application::~Application() {
     backend->cancel();
     hotkey->unbind();
-    QList<EditorWindow *> editors;
+    QList<QWidget *> editors;
     for (auto *w : QApplication::topLevelWidgets())
-        if (auto *editor = qobject_cast<EditorWindow *>(w))
-            editors << editor;
+        if (qobject_cast<EditorWindow *>(w) || qobject_cast<SelectionOverlay *>(w))
+            editors << w;
     qDeleteAll(editors);
     QThreadPool::globalInstance()->waitForDone();
 }
@@ -328,13 +327,17 @@ void Application::beginCapture() {
     backend->capture(pendingMode, screen);
 }
 void Application::edit(QImage image, bool ocr, bool translate) {
-    auto *w = new EditorWindow(image, settings, config);
+    auto session = std::make_shared<EditorSession>(image, settings, config);
+    edit(session);
+    if (ocr || translate)
+        session->runOcr(translate);
+}
+void Application::edit(std::shared_ptr<EditorSession> session) {
+    auto *w = new EditorWindow(session);
     connect(w, &EditorWindow::settingsRequested, this, &Application::settingsDialog);
     w->show();
     if (settings.value("general/autoCopy", false).toBool())
-        QApplication::clipboard()->setImage(image);
-    if (ocr || translate)
-        QTimer::singleShot(0, w, [w, translate] { w->runOcr(translate); });
+        QApplication::clipboard()->setImage(session->document.render());
 }
 void Application::open(QString path) {
     if (path.isEmpty())

@@ -15,6 +15,7 @@ option(SNAPLING_TESSERACT "启用本地 Tesseract OCR" ON)
 set(SOURCES
  src/platform/Autostart.cpp src/core/Types.cpp src/capture/CaptureService.cpp src/hotkey/Hotkey.cpp
  src/selection/SelectionOverlay.cpp src/editor/Document.cpp src/editor/Canvas.cpp
+ src/editor/EditorSession.cpp src/editor/AnnotationTools.cpp
  src/ocr/OcrEngine.cpp src/ocr/TextLayout.cpp src/translation/TranslationProvider.cpp
  src/image/ImageProcessor.cpp src/history/HistoryStore.cpp src/settings/Settings.cpp
  src/ui/EditorWindow.cpp src/ui/SettingsDialog.cpp src/ui/PinWindow.cpp
@@ -103,6 +104,22 @@ if(BUILD_TESTING)
  add_executable(snapling_desktop_test tests/TestDesktop.cpp)
  target_link_libraries(snapling_desktop_test PRIVATE snapling_lib Qt6::Test)
  target_compile_definitions(snapling_desktop_test PRIVATE SNAPLING_TEST_MODEL_DIR="${PROJECT_SOURCE_DIR}/models/tessdata")
+ if(UNIX)
+  add_executable(snapling_quick_edit_test tests/TestQuickEdit.cpp)
+  target_link_libraries(snapling_quick_edit_test PRIVATE snapling_lib Qt6::Test)
+  add_dependencies(snapling_quick_edit_test snapling_desktop_test)
+  find_program(XVFB_RUN xvfb-run)
+  find_program(XDOTOOL xdotool)
+  if(XVFB_RUN AND XDOTOOL)
+   add_test(NAME quick_edit COMMAND ${XVFB_RUN} -a -s "-screen 0 1920x1080x24" $<TARGET_FILE:snapling_quick_edit_test>)
+   set_tests_properties(quick_edit PROPERTIES ENVIRONMENT "TESSDATA_PREFIX=${PROJECT_SOURCE_DIR}/models/tessdata")
+   foreach(SCALE IN ITEMS 1.5 2)
+    add_test(NAME quick_edit_scale_${SCALE} COMMAND ${XVFB_RUN} -a -s "-screen 0 1920x1080x24" $<TARGET_FILE:snapling_quick_edit_test>
+     instantAnnotations instantOcr advancedHandoff translatedPng)
+    set_tests_properties(quick_edit_scale_${SCALE} PROPERTIES ENVIRONMENT "TESSDATA_PREFIX=${PROJECT_SOURCE_DIR}/models/tessdata;QT_SCALE_FACTOR=${SCALE}")
+   endforeach()
+  endif()
+ endif()
 endif()
 set(CPACK_PACKAGING_INSTALL_PREFIX "/usr")
 set(CPACK_STRIP_FILES TRUE)

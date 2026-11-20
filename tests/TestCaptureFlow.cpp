@@ -88,7 +88,7 @@ class TestCaptureFlow : public QObject {
         QTest::addColumn<QString>("command");
         QTest::addColumn<int>("shape");
         QTest::addColumn<uint>("nonInteractiveCode");
-        QTest::addColumn<bool>("directToEditor");
+        QTest::addColumn<bool>("quickReady");
         QTest::addColumn<int>("requestCount");
         QTest::newRow("interactive-region") << "--capture" << -1 << uint(2) << true << 2;
         QTest::newRow("interactive-window") << "--window" << -1 << uint(2) << true << 1;
@@ -103,7 +103,7 @@ class TestCaptureFlow : public QObject {
         QFETCH(QString, command);
         QFETCH(int, shape);
         QFETCH(uint, nonInteractiveCode);
-        QFETCH(bool, directToEditor);
+        QFETCH(bool, quickReady);
         QFETCH(int, requestCount);
         portal.nonInteractiveCode = nonInteractiveCode;
         Application app;
@@ -122,16 +122,22 @@ class TestCaptureFlow : public QObject {
             QVERIFY(capture);
             capture->click();
         }
-        QTRY_VERIFY_WITH_TIMEOUT(!windows<EditorWindow>().isEmpty() ||
-                                     !windows<SelectionOverlay>().isEmpty(), 5000);
+        QTRY_VERIFY_WITH_TIMEOUT(!windows<SelectionOverlay>().isEmpty(), 5000);
         QCOMPARE(portal.requests.size(), requestCount);
         QCOMPARE(portal.requests.first(), command == "--window");
         QCOMPARE(portal.requests.last(), requestCount == 2 || command == "--window");
-        QCOMPARE(windows<EditorWindow>().size(), directToEditor ? 1 : 0);
-        QCOMPARE(windows<SelectionOverlay>().size(), directToEditor ? 0 : 1);
-        if (directToEditor)
-            QCOMPARE(windows<EditorWindow>().first()->document()->render(),
-                     image.convertToFormat(QImage::Format_ARGB32_Premultiplied));
+        QVERIFY(windows<EditorWindow>().isEmpty());
+        QCOMPARE(windows<SelectionOverlay>().size(), 1);
+        auto *overlay = windows<SelectionOverlay>().first();
+        if (quickReady) {
+            QTRY_VERIFY_WITH_TIMEOUT(overlay->canvasWidget(), 5000);
+            auto *document = &overlay->session()->document;
+            QCOMPARE(document->render(), image.convertToFormat(QImage::Format_ARGB32_Premultiplied));
+            QTest::keyClick(overlay->canvasWidget(), Qt::Key_Return);
+            QTRY_COMPARE(windows<EditorWindow>().size(), 1);
+            QCOMPARE(windows<EditorWindow>().first()->document(), document);
+        } else
+            QCOMPARE(overlay->phase(), SelectionOverlay::Phase::Selecting);
     }
     void cancelThenRetry() {
         portal.nonInteractiveCode = 1;
@@ -143,11 +149,10 @@ class TestCaptureFlow : public QObject {
         QVERIFY(windows<SelectionOverlay>().isEmpty());
         portal.nonInteractiveCode = 2;
         app.command({"--capture"});
-        QTRY_VERIFY_WITH_TIMEOUT(!windows<EditorWindow>().isEmpty() ||
-                                     !windows<SelectionOverlay>().isEmpty(), 5000);
+        QTRY_VERIFY_WITH_TIMEOUT(!windows<SelectionOverlay>().isEmpty(), 5000);
         QCOMPARE(portal.requests.size(), 3);
-        QCOMPARE(windows<EditorWindow>().size(), 1);
-        QVERIFY(windows<SelectionOverlay>().isEmpty());
+        QVERIFY(windows<EditorWindow>().isEmpty());
+        QTRY_VERIFY(windows<SelectionOverlay>().first()->canvasWidget());
     }
     void cleanupTestCase() {
         auto bus = QDBusConnection::sessionBus();

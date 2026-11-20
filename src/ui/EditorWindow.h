@@ -1,7 +1,7 @@
 #pragma once
 #include "editor/Canvas.h"
 #include "editor/Document.h"
-#include "ocr/OcrEngine.h"
+#include "editor/EditorSession.h"
 #include "settings/Settings.h"
 #include "translation/TranslationProvider.h"
 #include <QDockWidget>
@@ -11,6 +11,8 @@ class EditorWindow final : public QMainWindow {
     Q_OBJECT
   public:
     EditorWindow(QImage image, Settings &settings, ProviderConfig &config);
+    explicit EditorWindow(std::shared_ptr<EditorSession> session);
+    ~EditorWindow() override;
     Document *document() {
         return &doc;
     }
@@ -29,17 +31,12 @@ class EditorWindow final : public QMainWindow {
     void saveProject();
     void exportText();
     void sensitive();
-    void setBusy(bool busy, QString message);
-    void startTranslation();
+    void requestTranslationApproval(QString endpoint);
     void editTranslation();
+    std::shared_ptr<EditorSession> editing;
     Settings &settings;
-    ProviderConfig &config;
-    Document doc;
+    Document &doc;
     Canvas *canvas;
-    TesseractOcr ocr;
-    OpenAiTranslationProvider provider;
-    bool afterOcrTranslate = false;
-    bool busy = false;
     QString savedPath;
     QAction *cancelAction;
     QDockWidget *comparison;

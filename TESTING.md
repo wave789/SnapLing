@@ -7,11 +7,13 @@
 ./tools/test-desktop.sh -o build/desktop-tests.log,txt
 ```
 
-CTest 使用 offscreen Qt 平台，但执行真实图片算法、序列化与离线 OCR。包含负原点/多显示器坐标、125/150/200% DPI、三角/椭圆 Mask、裁剪旋转翻转、非破坏性撤销、PNG/JPG、工程损坏/未知版本、Unicode grapheme 跨行选择、OCR 坐标映射、JSON/块 ID 验证、背景和译文布局、导出、配置密钥不落盘、历史清理、本机 HTTP 异步/取消、实际中英文 OCR。
+CTest 的核心套件使用 offscreen Qt 平台，执行真实图片算法、序列化与离线 OCR。包含负原点/多显示器坐标、125/150/200% DPI、三角/椭圆 Mask、裁剪旋转翻转、非破坏性撤销、PNG/JPG、工程损坏/未知版本、Unicode grapheme 跨行选择、OCR 坐标映射、JSON/块 ID 验证、背景和译文布局、导出、配置密钥不落盘、历史清理、本机 HTTP 异步/取消、实际中英文 OCR。
 
 HTTP 测试服务器仅作为 **测试替身**，生产代码通过 QNetworkAccessManager 访问用户配置的真实服务。模型/服务响应验证和本地请求测试不能代替 Ollama 或远程实际模型验收。
 
-安装了 `dbus-run-session` 时，CTest 还运行截图流程回归测试。测试在独立 D-Bus 会话中模拟 Screenshot Portal 响应，调用实际应用入口，验证系统区域/窗口截图直接打开编辑器、自定义形状进入选区、取消后重试以及编辑器退出时的窗口释放。这些响应来自测试替身，GNOME 系统截图授权仍需实机验收。
+安装了 `dbus-run-session` 时，CTest 还运行截图流程回归测试。测试在独立 D-Bus 会话中模拟 Screenshot Portal 响应，调用实际应用入口，验证系统选好的区域/窗口直接进入即时编辑，全屏截图进入即时编辑，Enter 后共享文档进入高级编辑，以及自定义形状选区、取消后重试和窗口释放。这些响应来自测试替身，GNOME 系统截图授权仍需实机验收。
+
+安装了 `xvfb-run` 和 `xdotool` 时，CTest 运行 `quick_edit`。外部目标进程提供实际窗口，生产 X11 热键和 XCB 后端捕获像素，Qt 鼠标/键盘事件完成框选、即时箭头和矩形、中英文 OCR 跨行选择与复制、选区内翻译显示、PNG/JPEG 文件对话框保存与格式选择，以及 Enter 后对象修改和撤销重做。另验证 OCR/翻译未结束时进入高级编辑器、翻译失败的非阻塞提示和取消截图。翻译响应由本地 HTTP 测试替身提供。同一流程在 150% 和 200% 缩放下重跑标注、OCR、高级编辑交接和译文保存。界面截图生成于 `build/quick-edit-ui.png`、`build/quick-edit-ui-150.png` 和 `build/quick-edit-ui-200.png`。
 
 桌面测试在独立 Xvfb 1920×1080 根窗口上创建真实 QWidget 与 QMenu，再由生产 XCB 后端采集屏幕。校验菜单仍可见、菜单像素一致、区域选择、箭头编辑、PNG/JPG/工程保存重载、剪贴板、真实中英文 OCR、鼠标拖选中文及 Ctrl+C。使用 xdotool 发送实际 X11 按键，验证 XGrabKey 和冲突。25 次采集同时记录采集耗时、选区首帧耗时及 RSS 变化。测试图像不是用户桌面，不包含用户内容。
 

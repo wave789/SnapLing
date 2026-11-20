@@ -12,6 +12,7 @@
 #include <QSystemTrayIcon>
 namespace SnapLing {
 class EditorWindow;
+class EditorSession;
 class Application final : public QObject {
     Q_OBJECT
   public:
@@ -31,6 +32,7 @@ class Application final : public QObject {
     QList<QPointer<QWidget>> hiddenWindows;
     bool preparing = false;
     void edit(QImage image, bool ocr = false, bool translate = false);
+    void edit(std::shared_ptr<EditorSession> session);
     void open(QString path = {});
     void settingsDialog();
     void historyDialog();

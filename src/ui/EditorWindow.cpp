@@ -1,18 +1,12 @@
 #include "EditorWindow.h"
+#include "editor/AnnotationTools.h"
 #include "PinWindow.h"
-#include "history/HistoryStore.h"
 #include "image/ImageProcessor.h"
-#include <QActionGroup>
 #include <QApplication>
 #include <QClipboard>
-#include <QColorDialog>
 #include <QComboBox>
-#include <QDateTime>
 #include <QDesktopServices>
-#include <QDir>
-#include <QDoubleSpinBox>
 #include <QFileDialog>
-#include <QFontDialog>
 #include <QFutureWatcher>
 #include <QInputDialog>
 #include <QLabel>
@@ -20,16 +14,20 @@
 #include <QRegularExpression>
 #include <QSaveFile>
 #include <QScrollArea>
-#include <QSpinBox>
+#include <QScreen>
 #include <QStatusBar>
 #include <QToolBar>
 #include <QtConcurrent>
 namespace SnapLing {
 EditorWindow::EditorWindow(QImage image, Settings &s, ProviderConfig &c)
-    : settings(s), config(c), doc(std::move(image)) {
+    : EditorWindow(std::make_shared<EditorSession>(std::move(image), s, c)) {}
+EditorWindow::EditorWindow(std::shared_ptr<EditorSession> session)
+    : editing(std::move(session)), settings(editing->settings),
+      doc(editing->document) {
     setAttribute(Qt::WA_DeleteOnClose);
     setWindowTitle("SnapLing · 截图编辑");
-    resize(1180, 780);
+    const auto available = QGuiApplication::primaryScreen()->availableGeometry().size() - QSize(32, 32);
+    resize(QSize(1180, 780).boundedTo(available));
     auto *scroll = new QScrollArea;
     canvas = new Canvas(&doc);
     scroll->setWidget(canvas);
@@ -37,51 +35,7 @@ EditorWindow::EditorWindow(QImage image, Settings &s, ProviderConfig &c)
     setCentralWidget(scroll);
     auto *tools = addToolBar("标注工具");
     tools->setMovable(false);
-    auto *group = new QActionGroup(this);
-    group->setExclusive(true);
-    const QList<QPair<QString, Tool>> list{
-        {"选择", Tool::Select}, {"矩形", Tool::Rectangle}, {"椭圆", Tool::Ellipse},     {"直线", Tool::Line},
-        {"箭头", Tool::Arrow},  {"画笔", Tool::Pen},       {"荧光", Tool::Highlighter}, {"文字", Tool::Text},
-        {"序号", Tool::Number}, {"马赛克", Tool::Mosaic},  {"模糊", Tool::Blur},        {"裁剪", Tool::Crop},
-        {"取色", Tool::Picker}};
-    for (auto [name, tool] : list) {
-        auto *a = tools->addAction(name);
-        a->setCheckable(true);
-        group->addAction(a);
-        if (tool == Tool::Select)
-            a->setChecked(true);
-        connect(a, &QAction::triggered, this, [this, tool] { canvas->setTool(tool); });
-    }
-    tools->addSeparator();
-    auto *color = tools->addAction("颜色");
-    connect(color, &QAction::triggered, this, [this] {
-        auto c = QColorDialog::getColor(canvas->color(), this);
-        if (c.isValid())
-            canvas->setColor(c);
-    });
-    auto *width = new QSpinBox;
-    width->setRange(1, 50);
-    width->setValue(3);
-    width->setPrefix("线宽 ");
-    tools->addWidget(width);
-    connect(width, qOverload<int>(&QSpinBox::valueChanged), canvas, &Canvas::setWidth);
-    auto *font = tools->addAction("字体");
-    connect(font, &QAction::triggered, this, [this] {
-        bool ok;
-        auto f = QFontDialog::getFont(&ok, QFont(), this);
-        if (ok) {
-            if (f.pixelSize() < 1)
-                f.setPixelSize(qRound(f.pointSizeF() * 96 / 72));
-            canvas->setFont(f);
-        }
-    });
-    auto *opacity = new QDoubleSpinBox;
-    opacity->setRange(.05, 1);
-    opacity->setSingleStep(.1);
-    opacity->setValue(1);
-    opacity->setPrefix("透明度 ");
-    tools->addWidget(opacity);
-    connect(opacity, qOverload<double>(&QDoubleSpinBox::valueChanged), canvas, &Canvas::setOpacity);
+    addAnnotationTools(tools, canvas, true);
     addToolBarBreak();
     auto *actions = addToolBar("截图操作");
     actions->setMovable(false);
@@ -99,8 +53,8 @@ EditorWindow::EditorWindow(QImage image, Settings &s, ProviderConfig &c)
         undo->setEnabled(doc.canUndo());
         redo->setEnabled(doc.canRedo());
     });
-    undo->setEnabled(false);
-    redo->setEnabled(false);
+    undo->setEnabled(doc.canUndo());
+    redo->setEnabled(doc.canRedo());
     action("旋转", [this] { doc.change([](auto &s) { s.rotation = (s.rotation + 90) % 360; }); });
     action("恢复裁剪", [this] { doc.change([this](auto &s) { s.crop = doc.original().rect(); }); });
     action("水平翻转", [this] { doc.change([](auto &s) { s.flipH = !s.flipH; }); });
@@ -118,6 +72,7 @@ EditorWindow::EditorWindow(QImage image, Settings &s, ProviderConfig &c)
     action("调整译文", [this] { editTranslation(); });
     auto *mode = new QComboBox;
     mode->addItems({"原文", "译文", "对照"});
+    mode->setCurrentIndex(doc.state().translationMode);
     actions->addWidget(mode);
     comparison = new QDockWidget("原始截图", this);
     auto *original = new QLabel;
@@ -126,7 +81,7 @@ EditorWindow::EditorWindow(QImage image, Settings &s, ProviderConfig &c)
         QPixmap::fromImage(doc.original().scaled(560, 700, Qt::KeepAspectRatio, Qt::SmoothTransformation)));
     comparison->setWidget(original);
     addDockWidget(Qt::RightDockWidgetArea, comparison);
-    comparison->hide();
+    comparison->setVisible(doc.state().translationMode == 2);
     connect(&doc, &Document::changed, this, [this, original, mode] {
         mode->setCurrentIndex(doc.state().translationMode);
         comparison->setVisible(doc.state().translationMode == 2);
@@ -147,10 +102,9 @@ EditorWindow::EditorWindow(QImage image, Settings &s, ProviderConfig &c)
     connect(panel, qOverload<int>(&QComboBox::activated), this,
             [this](int i) { doc.change([i](auto &s) { s.panel = i == 1; }); });
     cancelAction = action("取消任务", [this] {
-        ocr.cancel();
-        provider.cancel();
+        editing->cancel();
     });
-    cancelAction->setEnabled(false);
+    cancelAction->setEnabled(editing->task() != EditorSession::Task::Idle || editing->awaitingApproval());
     addToolBarBreak();
     auto *output = addToolBar("输出");
     output->setMovable(false);
@@ -197,149 +151,63 @@ EditorWindow::EditorWindow(QImage image, Settings &s, ProviderConfig &c)
     outputAction("关闭", [this] { close(); }, QKeySequence(Qt::Key_Escape));
     connect(canvas, &Canvas::copyRequested, this, &EditorWindow::copy);
     connect(canvas, &Canvas::status, this, [this](QString m) { statusBar()->showMessage(m, 8000); });
-    connect(&ocr, &IOcrEngine::completed, this, [this, mode](auto lines, qint64 ms, bool cold) {
-        doc.change([lines](auto &s) {
-            s.ocr = lines;
-            s.translations.clear();
-            s.translationMode = 0;
-        });
-        mode->setCurrentIndex(0);
-        canvas->setTool(Tool::Ocr);
-        setBusy(false, QString("OCR 完成：%1 行，%2 ms（%3），字符位置为估算值")
-                           .arg(lines.size())
-                           .arg(ms)
-                           .arg(cold ? "冷启动" : "热启动"));
-        qInfo("ocr_ms=%lld cold=%d lines=%lld", ms, int(cold), qint64(lines.size()));
-        if (afterOcrTranslate) {
-            afterOcrTranslate = false;
-            startTranslation();
-        }
+    connect(editing.get(), &EditorSession::statusChanged, this, [this](QString message, bool) {
+        statusBar()->showMessage(message);
     });
-    connect(&ocr, &IOcrEngine::progress, this, [this](int p) {
-        if (busy)
-            statusBar()->showMessage(QString("正在本地 OCR：%1% · 可取消").arg(p));
+    connect(editing.get(), &EditorSession::taskChanged, this, [this] {
+        cancelAction->setEnabled(editing->task() != EditorSession::Task::Idle || editing->awaitingApproval());
     });
-    connect(&ocr, &IOcrEngine::failed, this, [this](QString e) {
-        afterOcrTranslate = false;
-        setBusy(false, e);
-        QMessageBox::warning(this, "OCR", e);
-    });
-    connect(&provider, &ITranslationProvider::completed, this, [this, mode](auto units, qint64 ms) {
-        int overflow = 0;
-        for (auto &u : units) {
-            auto fit = fitTranslation(u.target, u.box, doc.original().size(), u.fontSize);
-            u.overflow = fit.overflow;
-            if (fit.overflow)
-                ++overflow;
-        }
-        doc.change([units](auto &s) {
-            s.translations = units;
-            s.translationMode = 1;
-        });
-        mode->setCurrentIndex(1);
-        setBusy(false,
-                QString("翻译完成，%1 ms。%2 个区域需手工调整；可点击“调整译文”。").arg(ms).arg(overflow));
-        qInfo("translation_ms=%lld", ms);
-    });
-    connect(&provider, &ITranslationProvider::failed, this, [this](QString e) {
-        setBusy(false, e);
-        QMessageBox::warning(this, "翻译", e);
-    });
-    statusBar()->showMessage(
-        "双击文字可修改；选择工具可移动/删除标注；滚轮缩放。OCR 中 Ctrl+C 优先复制所选文字。");
+    connect(editing.get(), &EditorSession::imageSaved, this, [this](QString path) { savedPath = path; });
+    connect(editing.get(), &EditorSession::translationApprovalRequested,
+            this, &EditorWindow::requestTranslationApproval);
+    if (editing->awaitingApproval())
+        QTimer::singleShot(0, this, [this] { requestTranslationApproval(editing->translationEndpoint()); });
+    savedPath = editing->savedPath();
+    statusBar()->showMessage(editing->message().isEmpty()
+        ? "双击文字可修改；选择工具可移动/删除标注；滚轮缩放。OCR 中 Ctrl+C 优先复制所选文字。"
+        : editing->message());
 }
-void EditorWindow::setBusy(bool b, QString m) {
-    busy = b;
-    cancelAction->setEnabled(b);
-    statusBar()->showMessage(m);
+EditorWindow::~EditorWindow() {
+    disconnect(editing.get(), nullptr, this, nullptr);
+    disconnect(&doc, nullptr, this, nullptr);
+    canvas->finishTextEdit(true);
+    delete canvas;
+    canvas = nullptr;
 }
-void EditorWindow::runOcr(bool then) {
-    if (busy)
-        return;
-    afterOcrTranslate = then;
-    setBusy(true, "正在本地识别文字… 可取消");
-    ocr.recognize(doc.original(), settings.value("ocr/path", findTessdata()).toString(),
-                  settings.value("ocr/languages", "chi_sim+eng").toString(),
-                  settings.value("ocr/cache", true).toBool());
+void EditorWindow::requestTranslationApproval(QString endpoint) {
+    auto *dialog = new QMessageBox(QMessageBox::Question, "翻译内容发送确认",
+        "允许将 OCR 文字发送到该服务？\n" + QUrl(endpoint).adjusted(
+            QUrl::RemoveUserInfo | QUrl::RemoveQuery | QUrl::RemoveFragment).toString(),
+        QMessageBox::Yes | QMessageBox::No, this);
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->setWindowModality(Qt::NonModal);
+    connect(dialog, &QMessageBox::finished, editing.get(), [session = editing](int result) {
+        session->approveTranslation(result == QMessageBox::Yes);
+    });
+    dialog->show();
+}
+void EditorWindow::runOcr(bool thenTranslate) {
+    canvas->setTool(Tool::Ocr);
+    editing->runOcr(thenTranslate);
 }
 void EditorWindow::translate() {
-    if (busy)
-        return;
-    if (doc.state().ocr.isEmpty())
-        runOcr(true);
-    else
-        startTranslation();
-}
-void EditorWindow::startTranslation() {
-    QString endpoint = QUrl(config.baseUrl)
-                           .adjusted(QUrl::RemoveUserInfo | QUrl::RemoveQuery | QUrl::RemoveFragment)
-                           .toString();
-    QString message = config.isLocal() ? "将 OCR 文字发送到本机服务：\n" + endpoint
-                                       : "将 OCR 文字发送到远程服务：\n" + endpoint +
-                                             "\n请确认你允许向该服务发送所选内容。";
-    if (!config.isLocal() &&
-        QMessageBox::question(this, "翻译内容发送确认", message, QMessageBox::Yes | QMessageBox::No,
-                              QMessageBox::No) != QMessageBox::Yes)
-        return;
-    auto lines = doc.state().ocr;
-    auto selected = canvas->selectedLines();
-    if (!selected.isEmpty())
-        lines = selected;
-    setBusy(true, (config.isLocal() ? "本机翻译：" : "远程翻译：") + endpoint + " · 可取消");
-    provider.translate(translationUnits(lines, config.targetLanguage), config);
+    editing->translate(canvas->selectedLines());
 }
 void EditorWindow::copy() {
     if (!canvas->selectedText().isEmpty())
         QApplication::clipboard()->setText(canvas->selectedText());
     else
-        QApplication::clipboard()->setImage(doc.render());
+        editing->copyImage();
     statusBar()->showMessage("已复制", 3000);
     if (settings.value("general/closeAfterCopy", false).toBool())
         close();
 }
 void EditorWindow::saveImage() {
-    auto format = settings.value("general/format", "PNG").toString();
-    auto path = QFileDialog::getSaveFileName(
-        this, "保存图片",
-        settings.value("general/saveDir", QDir::homePath() + "/Pictures").toString() + "/SnapLing_" +
-            QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss") + (format == "JPG" ? ".jpg" : ".png"),
-        "PNG (*.png);;JPEG (*.jpg *.jpeg)");
-    if (path.isEmpty())
-        return;
-    // 冻结编辑状态，在工作线程渲染、编码和写入，避免保存 4K 图像阻塞界面。
-    auto source = doc.original();
-    auto state = doc.state();
-    auto bg = QColor(settings.value("general/jpegBackground", "#ffffff").toString());
-    int quality = settings.value("general/quality", 92).toInt();
-    bool keep = settings.value("history/enabled", false).toBool();
-    int days = settings.value("history/days", 30).toInt();
-    qint64 limit = settings.value("history/megabytes", 512).toLongLong() * 1024 * 1024;
-    auto *w = new QFutureWatcher<QString>(this);
-    connect(w, &QFutureWatcher<QString>::finished, this, [this, w, path] {
-        auto error = w->result();
-        w->deleteLater();
-        if (!error.isEmpty())
-            QMessageBox::warning(this, "保存失败", error);
-        else {
-            savedPath = path;
-            statusBar()->showMessage("已保存：" + path, 8000);
-        }
-    });
-    w->setFuture(QtConcurrent::run([source, state, path, bg, quality, keep, days, limit] {
-        Document d(source);
-        d.change([state](auto &s) { s = state; });
-        QString error;
-        if (!d.exportImage(path, error, bg, quality))
-            return error;
-        if (keep) {
-            HistoryStore h;
-            h.add(d.render(), !state.ocr.isEmpty(), !state.translations.isEmpty(), error);
-            h.prune(days, limit);
-        }
-        return error;
-    }));
+    canvas->finishTextEdit(true);
+    editing->requestSave(this);
 }
 void EditorWindow::saveProject() {
+    canvas->finishTextEdit(true);
     auto path = QFileDialog::getSaveFileName(this, "保存可编辑工程", {}, "SnapLing (*.snapling)");
     if (path.isEmpty())
         return;

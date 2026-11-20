@@ -1,12 +1,13 @@
 #include "Canvas.h"
 #include <QApplication>
 #include <QClipboard>
-#include <QInputDialog>
 #include <QKeyEvent>
+#include <QLineF>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QTextBoundaryFinder>
 #include <QWheelEvent>
+#include <QTextEdit>
 namespace SnapLing {
 Canvas::Canvas(Document *d, QWidget *p) : QWidget(p), document(d) {
     setFocusPolicy(Qt::StrongFocus);
@@ -15,6 +16,15 @@ Canvas::Canvas(Document *d, QWidget *p) : QWidget(p), document(d) {
     penFont.setPixelSize(24);
     connect(d, &Document::changed, this, &Canvas::rebuild);
     rebuild();
+}
+Canvas::~Canvas() {
+    if (textEditor)
+        textEditor->removeEventFilter(this);
+}
+void Canvas::setOverlayMode(bool enabled) {
+    overlayMode = enabled;
+    setMinimumSize(enabled ? QSize(1, 1) : QSize(320, 240));
+    update();
 }
 void Canvas::rebuild() {
     cached = document->render();
@@ -33,7 +43,8 @@ QSize Canvas::sizeHint() const {
 QTransform Canvas::sourceToWidget() const {
     if (cached.isNull())
         return {};
-    qreal scale = qMin(qreal(width() - 32) / cached.width(), qreal(height() - 32) / cached.height()) * zoom;
+    const int margin = overlayMode ? 0 : 32;
+    qreal scale = qMin(qreal(width() - margin) / cached.width(), qreal(height() - margin) / cached.height()) * zoom;
     QTransform t;
     t.translate((width() - cached.width() * scale) / 2, (height() - cached.height() * scale) / 2);
     t.scale(scale, scale);
@@ -43,6 +54,7 @@ QPointF Canvas::sourcePoint(QPointF p) const {
     return sourceToWidget().inverted().map(p);
 }
 void Canvas::setTool(Tool t) {
+    finishTextEdit(true);
     activeTool = t;
     selected = -1;
     dragging = false;
@@ -53,6 +65,7 @@ void Canvas::setTool(Tool t) {
     }
     setCursor(t == Tool::Ocr ? Qt::IBeamCursor : t == Tool::Select ? Qt::ArrowCursor : Qt::CrossCursor);
     update();
+    emit toolChanged(t);
 }
 void Canvas::updateSelected(std::function<void(Annotation &)> fn) {
     if (selected < 0 || selected >= document->state().annotations.size())
@@ -104,7 +117,7 @@ QVector<OcrLine> Canvas::selectedLines() const {
 void Canvas::selectAllText() {
     if (textLayout.lines().isEmpty())
         return;
-    activeTool = Tool::Ocr;
+    setTool(Tool::Ocr);
     textStart = {0, 0};
     int last = textLayout.lines().size() - 1;
     textEnd = {last, int(textLayout.characters(last).size()) - 1};
@@ -112,7 +125,8 @@ void Canvas::selectAllText() {
 }
 void Canvas::paintEvent(QPaintEvent *) {
     QPainter p(this);
-    p.fillRect(rect(), QColor("#252b36"));
+    if (!overlayMode)
+        p.fillRect(rect(), QColor("#252b36"));
     if (cached.isNull())
         return;
     auto t = sourceToWidget();
@@ -193,12 +207,7 @@ void Canvas::mousePressEvent(QMouseEvent *e) {
     pending.font = penFont;
     pending.points << anchor;
     if (activeTool == Tool::Text) {
-        bool ok = false;
-        pending.text = QInputDialog::getMultiLineText(this, "文字标注", "输入文字", {}, &ok);
-        if (ok && !pending.text.isEmpty()) {
-            auto a = pending;
-            document->change([a](auto &s) { s.annotations << a; });
-        }
+        beginTextEdit(pending);
         return;
     }
     if (activeTool == Tool::Number) {
@@ -277,14 +286,23 @@ void Canvas::mouseDoubleClickEvent(QMouseEvent *e) {
         textEnd = {hit.line, b};
         update();
     } else if (selected >= 0 && document->state().annotations[selected].tool == Tool::Text) {
-        bool ok;
-        auto text = QInputDialog::getMultiLineText(this, "修改标注", "文字",
-                                                   document->state().annotations[selected].text, &ok);
-        if (ok)
-            updateSelected([&](auto &a) { a.text = text; });
+        beginTextEdit(document->state().annotations[selected], selected);
     }
 }
 void Canvas::keyPressEvent(QKeyEvent *e) {
+    if (e->key() == Qt::Key_Return || e->key() == Qt::Key_Enter) {
+        emit confirmRequested();
+        return;
+    }
+    if (e->matches(QKeySequence::Undo)) {
+        document->undo();
+        return;
+    }
+    if (e->matches(QKeySequence::Redo) ||
+        (e->key() == Qt::Key_Z && e->modifiers() == (Qt::ControlModifier | Qt::ShiftModifier))) {
+        document->redo();
+        return;
+    }
     if (e->matches(QKeySequence::Copy)) {
         emit copyRequested();
         return;
@@ -302,7 +320,92 @@ void Canvas::keyPressEvent(QKeyEvent *e) {
     QWidget::keyPressEvent(e);
 }
 void Canvas::wheelEvent(QWheelEvent *e) {
+    if (overlayMode) {
+        e->ignore();
+        return;
+    }
     zoom = qBound(.2, zoom * (e->angleDelta().y() > 0 ? 1.15 : 1 / 1.15), 5.);
     update();
+}
+void Canvas::beginTextEdit(Annotation annotation, int index) {
+    finishTextEdit(true);
+    textDraft = std::move(annotation);
+    textIndex = index;
+    auto *editor = new QTextEdit(this);
+    textEditor = editor;
+    editor->setObjectName("annotationTextInput");
+    auto font = textDraft.font;
+    const auto transform = sourceToWidget();
+    const auto scale = QLineF(transform.map(QPointF()), transform.map(QPointF(1, 0))).length();
+    if (font.pixelSize() > 0)
+        font.setPixelSize(qMax(1, qRound(font.pixelSize() * scale)));
+    else
+        font.setPointSizeF(qMax(1., font.pointSizeF() * scale));
+    editor->setFont(font);
+    editor->setTextColor(textDraft.color);
+    editor->setPlainText(textDraft.text);
+    editor->setPlaceholderText("输入文字，Ctrl+Enter 完成，Esc 取消");
+    auto point = sourceToWidget().map(textDraft.points.first()).toPoint();
+    const int editorWidth = qMin(320, width());
+    const int editorHeight = qMin(100, height());
+    editor->setGeometry(qBound(0, point.x(), width() - editorWidth),
+                        qBound(0, point.y(), height() - editorHeight), editorWidth, editorHeight);
+    editor->installEventFilter(this);
+    editor->show();
+    editor->setFocus();
+    editor->selectAll();
+}
+void Canvas::finishTextEdit(bool commit) {
+    if (!textEditor)
+        return;
+    auto *editor = textEditor.data();
+    textEditor = nullptr;
+    editor->removeEventFilter(this);
+    textDraft.text = editor->toPlainText();
+    editor->hide();
+    editor->deleteLater();
+    if (commit && !textDraft.text.isEmpty()) {
+        const auto annotation = textDraft;
+        const int index = textIndex;
+        document->change([annotation, index](auto &state) {
+            if (index >= 0 && index < state.annotations.size())
+                state.annotations[index] = annotation;
+            else
+                state.annotations << annotation;
+        });
+    }
+}
+bool Canvas::eventFilter(QObject *object, QEvent *event) {
+    if (object == textEditor) {
+        if (event->type() == QEvent::ShortcutOverride) {
+            auto *key = static_cast<QKeyEvent *>(event);
+            if (key->matches(QKeySequence::Copy) || key->matches(QKeySequence::Cut) ||
+                key->matches(QKeySequence::Paste) || key->matches(QKeySequence::Undo) ||
+                key->matches(QKeySequence::Redo) || key->matches(QKeySequence::SelectAll) ||
+                key->key() == Qt::Key_Return || key->key() == Qt::Key_Enter || key->key() == Qt::Key_Escape) {
+                event->accept();
+                return true;
+            }
+        }
+        if (event->type() == QEvent::FocusOut) {
+            finishTextEdit(true);
+            return false;
+        }
+        if (event->type() == QEvent::KeyPress) {
+            auto *key = static_cast<QKeyEvent *>(event);
+            if (key->key() == Qt::Key_Escape) {
+                finishTextEdit(false);
+                setFocus();
+                return true;
+            }
+            if ((key->key() == Qt::Key_Return || key->key() == Qt::Key_Enter) &&
+                (key->modifiers() & Qt::ControlModifier)) {
+                finishTextEdit(true);
+                setFocus();
+                return true;
+            }
+        }
+    }
+    return QWidget::eventFilter(object, event);
 }
 } // namespace SnapLing

@@ -1,4 +1,19 @@
 #include "SelectionOverlay.h"
+#include "editor/AnnotationTools.h"
+#include "editor/Canvas.h"
+#include <QApplication>
+#include <QClipboard>
+#include <QCloseEvent>
+#include <QComboBox>
+#include <QFrame>
+#include <QHBoxLayout>
+#include <QLabel>
+#include <QPushButton>
+#include <QResizeEvent>
+#include <QSignalBlocker>
+#include <QTimer>
+#include <QToolBar>
+#include <QVBoxLayout>
 #include <QGuiApplication>
 #include <QKeyEvent>
 #include <QMouseEvent>
@@ -20,9 +35,11 @@ QImage maskedSelection(const QImage &source, const QPainterPath &path) {
     p.drawImage(0, 0, source);
     return result;
 }
-SelectionOverlay::SelectionOverlay(CaptureFrame f, CaptureMode m, QWidget *parent)
-    : QWidget(parent), frame(std::move(f)), mode(m) {
+SelectionOverlay::SelectionOverlay(CaptureFrame f, CaptureMode m, QWidget *parent,
+                                   std::shared_ptr<EditorSession> session)
+    : QWidget(parent), frame(std::move(f)), mode(m), editing(std::move(session)) {
     setAttribute(Qt::WA_DeleteOnClose);
+    setWindowTitle("SnapLing · 即时截图编辑");
     setWindowFlags(Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint | Qt::Tool);
     setMouseTracking(true);
     setCursor(Qt::CrossCursor);
@@ -36,12 +53,43 @@ SelectionOverlay::SelectionOverlay(CaptureFrame f, CaptureMode m, QWidget *paren
     }
     activateWindow();
     setFocus();
-    if (mode == CaptureMode::FullScreen)
+    if (mode == CaptureMode::FullScreen || frame.selectionComplete) {
         selected = frame.image.rect();
+        QTimer::singleShot(0, this, &SelectionOverlay::beginQuickEditing);
+    }
 }
-QPointF SelectionOverlay::imagePoint(QPointF p) const {
-    return {qBound(0., p.x() * frame.image.width() / width(), double(frame.image.width())),
-            qBound(0., p.y() * frame.image.height() / height(), double(frame.image.height()))};
+SelectionOverlay::~SelectionOverlay() {
+    if (editing) {
+        disconnect(editing.get(), nullptr, this, nullptr);
+        disconnect(&editing->document, nullptr, this, nullptr);
+    }
+    if (canvas) {
+        canvas->finishTextEdit(false);
+        delete canvas;
+        canvas = nullptr;
+    }
+}
+QRectF SelectionOverlay::imageViewport() const {
+    if (!frame.selectionComplete)
+        return rect();
+    const qreal dpr = devicePixelRatioF();
+    QSizeF size(frame.image.width() / dpr, frame.image.height() / dpr);
+    const QSizeF available(qMax(1, width() - 40), qMax(1, height() - 180));
+    if (size.width() > available.width() || size.height() > available.height())
+        size.scale(available, Qt::KeepAspectRatio);
+    return QRectF(QPointF((width() - size.width()) / 2, (height() - size.height()) / 2), size);
+}
+QRect SelectionOverlay::selectionGeometry() const {
+    const auto viewport = imageViewport();
+    return QRectF(viewport.x() + selected.x() * viewport.width() / frame.image.width(),
+                  viewport.y() + selected.y() * viewport.height() / frame.image.height(),
+                  selected.width() * viewport.width() / frame.image.width(),
+                  selected.height() * viewport.height() / frame.image.height()).toAlignedRect();
+}
+QPointF SelectionOverlay::imagePoint(QPointF point) const {
+    const auto viewport = imageViewport();
+    return {qBound(0., (point.x() - viewport.x()) * frame.image.width() / viewport.width(), double(frame.image.width())),
+            qBound(0., (point.y() - viewport.y()) * frame.image.height() / viewport.height(), double(frame.image.height()))};
 }
 QPainterPath SelectionOverlay::path() const {
     QPainterPath p;
@@ -55,48 +103,38 @@ QPainterPath SelectionOverlay::path() const {
     return p;
 }
 void SelectionOverlay::paintEvent(QPaintEvent *) {
-    QPainter p(this);
-    p.drawImage(rect(), frame.image);
-    p.fillRect(rect(), QColor(0, 0, 0, 115));
-    p.save();
-    p.scale(qreal(width()) / frame.image.width(), qreal(height()) / frame.image.height());
-    p.setClipPath(path());
-    p.drawImage(0, 0, frame.image);
-    p.restore();
-    p.save();
-    p.scale(qreal(width()) / frame.image.width(), qreal(height()) / frame.image.height());
-    p.setPen(QPen(QColor("#60a5fa"), 2. * frame.image.width() / width()));
-    p.setBrush(Qt::NoBrush);
-    p.drawPath(path());
-    p.restore();
-    auto sr =
-        QRectF(selected.x() * width() / frame.image.width(), selected.y() * height() / frame.image.height(),
-               selected.width() * width() / frame.image.width(),
-               selected.height() * height() / frame.image.height());
-    QString hint = QString("%1 × %2  |  Enter 编辑 · Esc 取消 · 方向键微调 · Shift 调整尺寸")
-                       .arg(qRound(selected.width()))
-                       .arg(qRound(selected.height()));
-    if (mode == CaptureMode::Polygon)
-        hint += " · 单击添加顶点，双击闭合";
-    QRect label(12, 12, qMin(width() - 24, 720), 30);
-    if (!sr.isEmpty())
-        label.moveTopLeft(QPoint(qBound(4, int(sr.left()), qMax(4, width() - label.width() - 4)),
-                                 qBound(4, int(sr.bottom() + 8), height() - 40)));
-    p.fillRect(label, QColor(20, 25, 35, 235));
-    p.setPen(Qt::white);
-    p.drawText(label.adjusted(8, 0, -8, 0), Qt::AlignVCenter, hint);
-    if (!cursor.isNull()) {
-        QPoint ip = imagePoint(cursor).toPoint();
-        ip.setX(qBound(0, ip.x(), frame.image.width() - 1));
-        ip.setY(qBound(0, ip.y(), frame.image.height() - 1));
-        QRect loupe(qBound(0, int(cursor.x() + 24), qMax(0, width() - 145)),
-                    qBound(0, int(cursor.y() + 30), qMax(0, height() - 150)), 136, 136);
-        p.fillRect(loupe, Qt::black);
-        p.drawImage(loupe.adjusted(3, 3, -3, -26), frame.image,
-                    QRect(ip - QPoint(zoom, zoom), QSize(zoom * 2 + 1, zoom * 2 + 1)));
-        p.setPen(Qt::white);
-        p.drawText(loupe.adjusted(3, 108, -3, -2), frame.image.pixelColor(ip).name().toUpper());
-        p.drawLine(loupe.center().x(), loupe.y() + 3, loupe.center().x(), loupe.bottom() - 26);
+    QPainter painter(this);
+    const auto viewport = imageViewport();
+    painter.fillRect(rect(), QColor("#151b25"));
+    painter.drawImage(viewport, frame.image);
+    painter.fillRect(rect(), QColor(0, 0, 0, 115));
+    painter.save();
+    painter.translate(viewport.topLeft());
+    painter.scale(viewport.width() / frame.image.width(), viewport.height() / frame.image.height());
+    painter.setClipPath(path());
+    painter.drawImage(0, 0, frame.image);
+    painter.restore();
+    painter.setPen(QPen(QColor("#60a5fa"), 1));
+    painter.drawRect(selectionGeometry());
+    if (currentPhase == Phase::Selecting) {
+        const QString hint = QString("%1 × %2 · 拖动框选后立即编辑 · Enter 高级编辑 · Esc 取消")
+                                 .arg(qRound(selected.width())).arg(qRound(selected.height()));
+        QRect label(12, 12, qMax(1, qMin(width() - 24, 760)), 32);
+        painter.fillRect(label, QColor(20, 25, 35, 235));
+        painter.setPen(Qt::white);
+        painter.drawText(label.adjusted(8, 0, -8, 0), Qt::AlignVCenter, hint);
+        if (!cursor.isNull()) {
+            auto pixel = imagePoint(cursor).toPoint();
+            pixel.setX(qBound(0, pixel.x(), frame.image.width() - 1));
+            pixel.setY(qBound(0, pixel.y(), frame.image.height() - 1));
+            QRect loupe(qBound(0, int(cursor.x() + 24), qMax(0, width() - 145)),
+                        qBound(0, int(cursor.y() + 30), qMax(0, height() - 150)), 136, 136);
+            painter.fillRect(loupe, Qt::black);
+            painter.drawImage(loupe.adjusted(3, 3, -3, -26), frame.image,
+                              QRect(pixel - QPoint(zoom, zoom), QSize(zoom * 2 + 1, zoom * 2 + 1)));
+            painter.setPen(Qt::white);
+            painter.drawText(loupe.adjusted(3, 108, -3, -2), frame.image.pixelColor(pixel).name().toUpper());
+        }
     }
     if (!painted) {
         painted = true;
@@ -105,10 +143,11 @@ void SelectionOverlay::paintEvent(QPaintEvent *) {
 }
 void SelectionOverlay::mousePressEvent(QMouseEvent *e) {
     if (e->button() == Qt::RightButton) {
-        emit cancelled();
         close();
         return;
     }
+    if (currentPhase != Phase::Selecting)
+        return;
     cursor = e->position();
     anchor = imagePoint(e->position());
     if (mode == CaptureMode::Polygon) {
@@ -131,6 +170,8 @@ void SelectionOverlay::mousePressEvent(QMouseEvent *e) {
     update();
 }
 void SelectionOverlay::mouseMoveEvent(QMouseEvent *e) {
+    if (currentPhase != Phase::Selecting)
+        return;
     cursor = e->position();
     auto point = imagePoint(e->position());
     if (dragging) {
@@ -175,19 +216,33 @@ void SelectionOverlay::mouseReleaseEvent(QMouseEvent *) {
     moving = false;
     resizing = false;
     selected = selected.intersected(frame.image.rect());
+    if (mode != CaptureMode::Polygon)
+        beginQuickEditing();
     update();
 }
 void SelectionOverlay::mouseDoubleClickEvent(QMouseEvent *) {
-    confirm();
+    if (currentPhase == Phase::Selecting)
+        beginQuickEditing();
 }
 void SelectionOverlay::keyPressEvent(QKeyEvent *e) {
     if (e->key() == Qt::Key_Escape) {
-        emit cancelled();
         close();
         return;
     }
     if (e->key() == Qt::Key_Return || e->key() == Qt::Key_Enter) {
-        confirm();
+        if (!canvas || !canvas->isEditingText())
+            confirm();
+        return;
+    }
+    if (currentPhase != Phase::Selecting) {
+        if (e->matches(QKeySequence::Undo))
+            editing->document.undo();
+        else if (e->matches(QKeySequence::Redo))
+            editing->document.redo();
+        else if (e->matches(QKeySequence::Copy))
+            copy();
+        else
+            QWidget::keyPressEvent(e);
         return;
     }
     QPointF d;
@@ -221,13 +276,182 @@ void SelectionOverlay::wheelEvent(QWheelEvent *e) {
     zoom = qBound(2, zoom + (e->angleDelta().y() > 0 ? -1 : 1), 24);
     update();
 }
+void SelectionOverlay::beginQuickEditing() {
+    if (currentPhase != Phase::Selecting || selected.width() < 1 || selected.height() < 1)
+        return;
+    auto image = maskedSelection(frame.image, path());
+    if (image.isNull())
+        return;
+    if (!editing)
+        editing = std::make_shared<EditorSession>(image);
+    else
+        editing->document.reset(image);
+    currentPhase = Phase::QuickEditing;
+    canvas = new Canvas(&editing->document, this);
+    canvas->setObjectName("quickCanvas");
+    canvas->setOverlayMode(true);
+    connect(canvas, &Canvas::confirmRequested, this, &SelectionOverlay::confirm);
+    connect(canvas, &Canvas::copyRequested, this, &SelectionOverlay::copy);
+    createToolbar();
+    positionEditor();
+    canvas->show();
+    toolbar->show();
+    toolbar->raise();
+    canvas->setFocus();
+    update();
+    emit quickEditingStarted();
+}
+void SelectionOverlay::createToolbar() {
+    toolbar = new QFrame(this);
+    toolbar->setObjectName("quickToolbar");
+    toolbar->setStyleSheet("QWidget{background:#f4f7fc;color:#18253b}"
+                          "QFrame#quickToolbar{background:#f4f7fc;border:1px solid #7993ba;border-radius:8px}"
+                          "QToolBar{border:0;spacing:2px;background:transparent}"
+                          "QToolButton{padding:5px;color:#18253b} QToolButton:checked{background:#c6ddff}");
+    auto *layout = new QVBoxLayout(toolbar);
+    layout->setContentsMargins(6, 6, 6, 6);
+    auto *tools = new QToolBar(toolbar);
+    tools->setMovable(false);
+    addAnnotationTools(tools, canvas, false);
+    layout->addWidget(tools);
+    auto *actions = new QToolBar(toolbar);
+    layout->addWidget(actions);
+    auto add = [&](QString name, auto callback) {
+        auto *action = actions->addAction(name);
+        connect(action, &QAction::triggered, this, callback);
+        return action;
+    };
+    auto *undo = add("撤销", [this] { editing->document.undo(); });
+    auto *redo = add("重做", [this] { editing->document.redo(); });
+    undo->setEnabled(false);
+    redo->setEnabled(false);
+    add("OCR", [this] { runOcr(); });
+    add("AI 翻译", [this] { translate(); });
+    add("全选文字", [this] { canvas->selectAllText(); canvas->setFocus(); });
+    add("复制文字", [this] {
+        TextLayout text;
+        text.setLines(editing->document.state().ocr);
+        QApplication::clipboard()->setText(canvas->selectedText().isEmpty() ? text.all() : canvas->selectedText());
+    });
+    add("复制译文", [this] { editing->copyTranslation(); });
+    add("复制图片", [this] { canvas->finishTextEdit(true); editing->copyImage(); });
+    add("保存", [this] { canvas->finishTextEdit(true); editing->requestSave(this); });
+    auto *cancelTask = add("取消任务", [this] { editing->cancel(); });
+    cancelTask->setEnabled(false);
+    auto *mode = new QComboBox(toolbar);
+    mode->addItems({"原文", "译文", "对照"});
+    actions->addWidget(mode);
+    connect(mode, qOverload<int>(&QComboBox::activated), this, [this](int index) {
+        editing->document.change([index](auto &state) { state.translationMode = index; });
+    });
+    add("✅", [this] { confirm(); })->setToolTip("进入高级编辑器（Enter）");
+    add("❌", [this] { close(); })->setToolTip("取消截图（Esc）");
+    originalPreview = new QLabel(toolbar);
+    originalPreview->setPixmap(QPixmap::fromImage(editing->document.original().scaled(220, 120, Qt::KeepAspectRatio)));
+    originalPreview->hide();
+    layout->addWidget(originalPreview);
+    auto *approval = new QWidget(toolbar);
+    auto *approvalLayout = new QHBoxLayout(approval);
+    auto *destination = new QLabel(approval);
+    destination->setWordWrap(true);
+    auto *allow = new QPushButton("允许发送", approval);
+    auto *deny = new QPushButton("取消发送", approval);
+    approvalLayout->addWidget(destination, 1);
+    approvalLayout->addWidget(allow);
+    approvalLayout->addWidget(deny);
+    layout->addWidget(approval);
+    approval->hide();
+    connect(allow, &QPushButton::clicked, editing.get(), [session = editing] { session->approveTranslation(true); });
+    connect(deny, &QPushButton::clicked, editing.get(), [session = editing] { session->approveTranslation(false); });
+    connect(editing.get(), &EditorSession::translationApprovalRequested, this,
+            [this, approval, destination](QString endpoint) {
+                destination->setText("将 OCR 文字发送到：" + endpoint);
+                approval->show();
+                positionEditor();
+            });
+    connect(editing.get(), &EditorSession::taskChanged, this, [this, cancelTask, approval] {
+        cancelTask->setEnabled(editing->task() != EditorSession::Task::Idle || editing->awaitingApproval());
+        approval->setVisible(editing->awaitingApproval());
+        positionEditor();
+    });
+    statusLabel = new QLabel("选区内可直接标注，Enter 或 ✅ 进入高级编辑器", toolbar);
+    statusLabel->setWordWrap(true);
+    layout->addWidget(statusLabel);
+    connect(editing.get(), &EditorSession::statusChanged, this, [this](QString message, bool error) {
+        statusLabel->setText(message);
+        statusLabel->setStyleSheet(error ? "color:#ad2334" : "color:#263e61");
+        positionEditor();
+    });
+    connect(canvas, &Canvas::status, statusLabel, &QLabel::setText);
+    connect(&editing->document, &Document::changed, this, [this, undo, redo, mode] {
+        undo->setEnabled(editing->document.canUndo());
+        redo->setEnabled(editing->document.canRedo());
+        const QSignalBlocker blocker(mode);
+        mode->setCurrentIndex(editing->document.state().translationMode);
+        originalPreview->setVisible(editing->document.state().translationMode == 2);
+        positionEditor();
+    });
+}
+void SelectionOverlay::positionEditor() {
+    if (!canvas || !toolbar)
+        return;
+    const auto selection = selectionGeometry();
+    canvas->setGeometry(selection);
+    toolbar->setFixedWidth(qMax(1, qMin(width() - 16, 1120)));
+    toolbar->adjustSize();
+    const int x = qBound(8, selection.left(), qMax(8, width() - toolbar->width() - 8));
+    int y = selection.bottom() + 8;
+    if (y + toolbar->height() > height() - 8)
+        y = selection.top() - toolbar->height() - 8;
+    if (y < 8)
+        y = selection.bottom() - toolbar->height() - 8;
+    y = qBound(8, y, qMax(8, height() - toolbar->height() - 8));
+    toolbar->move(x, y);
+    toolbar->raise();
+}
+void SelectionOverlay::runOcr(bool thenTranslate) {
+    if (!canvas)
+        return;
+    canvas->setTool(Tool::Ocr);
+    canvas->setFocus();
+    editing->runOcr(thenTranslate);
+}
+void SelectionOverlay::translate() {
+    if (canvas)
+        editing->translate(canvas->selectedLines());
+}
+void SelectionOverlay::copy() {
+    if (!canvas->selectedText().isEmpty())
+        QApplication::clipboard()->setText(canvas->selectedText());
+    else
+        editing->copyImage();
+}
+void SelectionOverlay::resizeEvent(QResizeEvent *event) {
+    QWidget::resizeEvent(event);
+    positionEditor();
+}
+void SelectionOverlay::closeEvent(QCloseEvent *event) {
+    if (!finalized) {
+        finalized = true;
+        currentPhase = Phase::Cancelled;
+        if (canvas)
+            canvas->finishTextEdit(false);
+        if (editing)
+            editing->cancel();
+        emit cancelled();
+    }
+    QWidget::closeEvent(event);
+}
 void SelectionOverlay::confirm() {
-    if (selected.width() < 1 || selected.height() < 1)
+    if (currentPhase == Phase::Selecting)
+        beginQuickEditing();
+    if (currentPhase != Phase::QuickEditing)
         return;
-    auto result = maskedSelection(frame.image, path());
-    if (result.isNull())
-        return;
-    emit accepted(result);
+    canvas->finishTextEdit(true);
+    currentPhase = Phase::AdvancedEditing;
+    finalized = true;
+    emit advancedRequested(editing);
+    emit accepted(editing->document.render());
     close();
 }
 } // namespace SnapLing
