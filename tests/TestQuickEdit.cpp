@@ -60,13 +60,14 @@ class TestQuickEdit : public QObject {
             }
         QFAIL(qPrintable("未找到工具：" + text));
     }
-    void capture(QRect region = QRect(15, 15, 765, 475)) {
+    void capture(QRect region = QRect(15, 15, 765, 475), bool sendMove = true, bool nativeMouse = false) {
         control({"windowfocus", targetWindow});
         control({"key", "Escape"});
         QTest::qWait(80);
         control({"key", "ctrl+alt+a"});
         QTRY_VERIFY_WITH_TIMEOUT(!windows<SelectionOverlay>().isEmpty(), 5000);
         overlay = windows<SelectionOverlay>().first();
+        const auto windowId = overlay->winId();
         QVERIFY(windows<EditorWindow>().isEmpty());
         const qreal dpr = qApp->primaryScreen()->devicePixelRatio();
         // 外部测试窗口位于逻辑坐标 (40, 40)，鼠标事件与捕获像素各自按 DPR 映射。
@@ -76,11 +77,31 @@ class TestQuickEdit : public QObject {
                             qRound(y.match(geometry).captured(1).toInt() / dpr));
         const auto from = overlay->mapFromGlobal(origin + region.topLeft());
         const auto to = overlay->mapFromGlobal(origin + region.topLeft() + QPoint(region.width(), region.height()));
-        QTest::mousePress(overlay, Qt::LeftButton, Qt::NoModifier, from);
-        QTest::mouseMove(overlay, to, 20);
-        QTest::mouseRelease(overlay, Qt::LeftButton, Qt::NoModifier, to);
-        QCOMPARE(overlay->phase(), SelectionOverlay::Phase::QuickEditing);
+        if (nativeMouse) {
+            const auto globalFrom = overlay->mapToGlobal(from);
+            const auto globalTo = overlay->mapToGlobal(to);
+            control({"mousemove", QString::number(qRound(globalFrom.x() * dpr)),
+                                  QString::number(qRound(globalFrom.y() * dpr))});
+            control({"mousedown", "1"});
+            control({"mousemove", QString::number(qRound(globalTo.x() * dpr)),
+                                  QString::number(qRound(globalTo.y() * dpr))});
+            QTRY_VERIFY(overlay->selection().width() > 0);
+        } else {
+            QTest::mousePress(overlay, Qt::LeftButton, Qt::NoModifier, from);
+            if (sendMove)
+                QTest::mouseMove(overlay, to, 20);
+        }
+        QCOMPARE(overlay->phase(), SelectionOverlay::Phase::Selecting);
+        QVERIFY(!overlay->canvasWidget());
+        if (nativeMouse)
+            control({"mouseup", "1"});
+        else
+            QTest::mouseRelease(overlay, Qt::LeftButton, Qt::NoModifier, to);
+        QTRY_COMPARE(overlay->phase(), SelectionOverlay::Phase::QuickEditing);
         QVERIFY(overlay->canvasWidget()->isVisible());
+        QCOMPARE(overlay->winId(), windowId);
+        QCOMPARE(windows<SelectionOverlay>().size(), 1);
+        QCOMPARE(overlay->findChild<QFrame *>("quickToolbar")->parentWidget(), overlay.data());
         QVERIFY(windows<EditorWindow>().isEmpty());
     }
     void draw(QString tool, QPointF from = {80, 70}, QPointF to = {260, 140}) {
@@ -154,6 +175,7 @@ class TestQuickEdit : public QObject {
         QTest::qWait(100);
     }
     void cleanup() {
+        control({"mouseup", "1"});
         application.reset();
         overlay = nullptr;
         QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
@@ -182,6 +204,21 @@ class TestQuickEdit : public QObject {
         QCOMPARE(document.state().annotations.size(), 1);
         click("重做");
         QCOMPARE(document.state().annotations.size(), 2);
+    }
+    void releaseWithoutMoveEvent() {
+        capture(QRect(15, 15, 765, 475), false);
+        QVERIFY(overlay);
+        QCOMPARE(overlay->phase(), SelectionOverlay::Phase::QuickEditing);
+        draw("箭头");
+        QCOMPARE(overlay->session()->document.state().annotations.size(), 1);
+        QVERIFY(windows<EditorWindow>().isEmpty());
+    }
+    void nativeMouseRelease() {
+        capture(QRect(15, 15, 765, 475), true, true);
+        QVERIFY(overlay);
+        draw("箭头");
+        QCOMPARE(overlay->session()->document.state().annotations.size(), 1);
+        QVERIFY(windows<EditorWindow>().isEmpty());
     }
     void instantOcr() {
         capture({20, 250, 760, 150});

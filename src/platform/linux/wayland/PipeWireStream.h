@@ -4,14 +4,14 @@
 #include <QObject>
 #include <memory>
 namespace SnapLing {
-class PipeWireStream final : public QObject {
+class PipeWireStream : public QObject {
     Q_OBJECT
   public:
     explicit PipeWireStream(QObject *parent = nullptr);
     ~PipeWireStream() override;
-    bool start(int fd, uint node, const QString &serial, QString &error);
-    void stop();
-    QImage latest() const;
+    virtual bool start(int fd, uint node, const QString &serial, QString &error);
+    virtual void stop();
+    virtual QImage latest() const;
   signals:
     void failed(QString error);
 

@@ -11,9 +11,9 @@ CTest 的核心套件使用 offscreen Qt 平台，执行真实图片算法、序
 
 HTTP 测试服务器仅作为 **测试替身**，生产代码通过 QNetworkAccessManager 访问用户配置的真实服务。模型/服务响应验证和本地请求测试不能代替 Ollama 或远程实际模型验收。
 
-安装了 `dbus-run-session` 时，CTest 还运行截图流程回归测试。测试在独立 D-Bus 会话中模拟 Screenshot Portal 响应，调用实际应用入口，验证系统选好的区域/窗口直接进入即时编辑，全屏截图进入即时编辑，Enter 后共享文档进入高级编辑，以及自定义形状选区、取消后重试和窗口释放。这些响应来自测试替身，GNOME 系统截图授权仍需实机验收。
+安装了 `dbus-run-session` 时，CTest 运行截图流程回归测试。在独立 D-Bus 会话中提供 ScreenCast Portal 测试替身和受控帧源，调用实际应用入口，验证整屏首帧、区域/窗口/自定义形状进入 SnapLing 选区、松开鼠标在同一遮罩内显示工具栏、Enter 后共享文档进入高级编辑。覆盖首帧延迟、临时共享关闭、主动持续共享、授权拒绝/取消/重试、旧响应隔离、负原点坐标和畸形节点列表。关闭 PipeWire 的构建验证非交互式 Screenshot 及拒绝后报错。这些测试未经过真实 PipeWire 视频传输或 GNOME 授权。
 
-安装了 `xvfb-run` 和 `xdotool` 时，CTest 运行 `quick_edit`。外部目标进程提供实际窗口，生产 X11 热键和 XCB 后端捕获像素，Qt 鼠标/键盘事件完成框选、即时箭头和矩形、中英文 OCR 跨行选择与复制、选区内翻译显示、PNG/JPEG 文件对话框保存与格式选择，以及 Enter 后对象修改和撤销重做。另验证 OCR/翻译未结束时进入高级编辑器、翻译失败的非阻塞提示和取消截图。翻译响应由本地 HTTP 测试替身提供。同一流程在 150% 和 200% 缩放下重跑标注、OCR、高级编辑交接和译文保存。界面截图生成于 `build/quick-edit-ui.png`、`build/quick-edit-ui-150.png` 和 `build/quick-edit-ui-200.png`。
+安装了 `xvfb-run` 和 `xdotool` 时，CTest 运行 `quick_edit`。外部目标进程提供实际窗口，生产 X11 热键和 XCB 后端捕获像素。xdotool 发送真实 X11 鼠标按下、移动、松开，确认工具栏在松开后属于原覆盖层，随后可画箭头；另验证缺少 MouseMove 事件的快速框选。Qt 鼠标/键盘事件覆盖即时箭头和矩形、中英文 OCR 跨行选择与复制、选区内翻译显示、PNG/JPEG 文件对话框保存与格式选择，以及 Enter 后对象修改和撤销重做。另验证 OCR/翻译未结束时进入高级编辑器、翻译失败的非阻塞提示和取消截图。翻译响应由本地 HTTP 测试替身提供。在 150% 和 200% 缩放下重跑真实鼠标框选、标注、OCR、高级编辑交接和译文保存。界面截图生成于 `build/quick-edit-ui.png`、`build/quick-edit-ui-150.png` 和 `build/quick-edit-ui-200.png`。
 
 桌面测试在独立 Xvfb 1920×1080 根窗口上创建真实 QWidget 与 QMenu，再由生产 XCB 后端采集屏幕。校验菜单仍可见、菜单像素一致、区域选择、箭头编辑、PNG/JPG/工程保存重载、剪贴板、真实中英文 OCR、鼠标拖选中文及 Ctrl+C。使用 xdotool 发送实际 X11 按键，验证 XGrabKey 和冲突。25 次采集同时记录采集耗时、选区首帧耗时及 RSS 变化。测试图像不是用户桌面，不包含用户内容。
 
@@ -27,7 +27,7 @@ Wayland 测试必须在真实登录会话中主动运行：
 QT_QPA_PLATFORM=wayland build/snapling_portal_test
 ```
 
-读取实际接口版本，并请求真实 Screenshot Portal。用户拒绝、权限失败或 10 秒内没有完成授权时，取消请求并明确标记 **SKIP**，不把空图片算作通过；不会自动开启持续屏幕共享，也不会保存测试时的用户桌面。
+读取实际接口版本，默认请求真实 ScreenCast/PipeWire 整屏首帧，未启用 PipeWire 时请求非交互式 Screenshot Portal。用户拒绝、权限失败或 10 秒内没有完成授权时，取消请求并明确标记 **SKIP**。普通截图取得首帧后关闭临时共享，测试结束还会取消未完成请求；测试不会保存用户桌面。
 
 ## 人工验收矩阵
 

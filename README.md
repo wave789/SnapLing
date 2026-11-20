@@ -2,12 +2,12 @@
 
 C++20 / Qt6 Widgets 截图工具。提供真实桌面捕获、非破坏性标注、图片上的离线 OCR 文字选择，以及兼容 Ollama 和 OpenAI Chat Completions 的原地翻译。
 
-当前版本为 **0.1.0**。本仓库包含可执行实现、离线中英文模型、自动化测试和打包工具。Windows 与 Wayland 快速共享仍需要交互式实机验收，不能把此版本视为所有平台均已完成验收的正式发布版。具体执行记录见 [TESTING.md](TESTING.md)，缺项见 [LIMITATIONS.md](LIMITATIONS.md)。
+当前版本为 **0.1.0**。本仓库包含可执行实现、离线中英文模型、自动化测试和打包工具。Windows 与 Wayland 屏幕访问仍需要交互式实机验收，具体执行记录见 [TESTING.md](TESTING.md)，缺项见 [LIMITATIONS.md](LIMITATIONS.md)。
 
 ## 已实现
 
-- Windows GDI / Linux X11 XCB+RandR / Wayland Screenshot Portal 截图后端；在显示选区前采集桌面，保留可捕获的普通菜单。
-- 主屏幕、指定显示器、整个桌面；矩形、窗口边界选择、椭圆、多边形、自由曲线；延时及倒计时取消。Wayland 显示器和窗口由系统选择器决定。
+- Windows GDI / Linux X11 XCB+RandR / Wayland ScreenCast Portal + PipeWire 截图后端；在显示选区前采集桌面，保留可捕获的普通菜单。
+- 主屏幕、指定显示器、整个桌面；矩形、窗口边界选择、椭圆、多边形、自由曲线；延时及倒计时取消。Wayland 通过系统授权选择一个显示器，再在 SnapLing 冻结画面上框选窗口内容或区域。
 - 原生或 Portal 全局快捷键、冲突提示、单实例命令转发、托盘和独立启动器入口。
 - 矩形、椭圆、直线、箭头、画笔、荧光笔、文字、序号、马赛克、近似模糊、裁剪、旋转、翻转；标注颜色、线宽、字体、透明度、移动、修改和删除；撤销/重做。
 - `.snapling` 版本化工程保存原图、编辑指令、OCR 和翻译布局；PNG 透明导出、JPG 背景色；异步保存图片。
@@ -15,7 +15,7 @@ C++20 / Qt6 Widgets 截图工具。提供真实桌面捕获、非破坏性标注
 - Ollama / OpenAI 兼容 HTTP API：供应商配置、环境变量密钥、连接测试、异步翻译、取消、超时、ID 校验、原地译文渲染和图片导出。
 - 简单背景估色覆盖、复杂背景底板、字号自适应、手动调整译文；容纳不了的文字阻止图片导出，工程仍保留完整内容。
 - 贴图、HEX 取色、ZXing 二维码识别、需确认的敏感信息打码建议、可关闭历史、主题与用户登录自动启动。
-- 用户主动开启的 ScreenCast Portal / PipeWire 快速截图实现：状态提示、停止共享、restore token、单帧缓存；尚未完成授权后的实机验收。
+- Wayland 普通截图按需开启 ScreenCast / PipeWire，取得完整屏幕首帧后结束临时共享，再显示 SnapLing 选区。用户也可主动开启持续共享以复用单帧缓存；支持状态提示、停止共享及 restore token，尚未完成授权后的实机验收。
 
 ## 构建和运行
 
@@ -36,7 +36,7 @@ sudo apt install build-essential cmake ninja-build pkg-config libxkbcommon-dev q
 ```bash
 snapling --capture        # 矩形选区
 snapling --full           # 全屏，显示器可在主界面选择
-snapling --window         # 窗口边界选区；Wayland 使用系统选择器
+snapling --window         # 窗口边界选区；Wayland 在冻结屏幕上框选窗口内容
 snapling --ocr
 snapling --translate
 snapling --delay 3
@@ -57,7 +57,7 @@ snapling --quit
 5. 点击 OCR 后直接拖选图中文字，Ctrl+C 优先复制选中的文字，Ctrl+A 全选。AI 翻译直接叠加到当前选区，可切换原文、译文和对照，复制译文或图片，直接保存 PNG/JPG。
 6. 按 Enter 或点击 ✅ 打开独立高级编辑器，同一份文档保留全部标注、OCR、翻译、撤销与重做历史，可继续裁剪、旋转、翻转、精调译文、保存工程或贴图。复制和保存会保留即时编辑界面，❌ 或 Esc 取消截图。
 
-Wayland 系统工具已选好的区域或窗口会直接显示即时编辑工具栏。Portal 没有提供原始区域的屏幕位置时，截图在覆盖层中按比例居中显示。普通 Portal 的系统授权与选择界面可能改变焦点，已授权的快速共享路径可从缓存帧开始选区。
+Wayland 先取得授权显示器的完整画面，再显示 SnapLing 的全屏选区。松开鼠标时，工具栏直接出现在同一遮罩内。首次屏幕访问仍需系统授权，后续是否再次询问由桌面决定。普通截图在取得首帧后结束临时共享；主动开启的持续共享保留到用户停止。未启用 PipeWire 的构建只尝试非交互式 Screenshot Portal，系统拒绝时显示依赖提示。
 
 即时编辑与高级编辑共享 `Document`、`Canvas` 和 `EditorSession`。OCR、翻译和图片保存异步运行，可在任务执行中继续标注、撤销、复制或进入高级编辑器。错误显示在当前界面的状态提示中。远程翻译通过非阻塞确认控件显示发送目的地。
 
@@ -81,6 +81,6 @@ Wayland 系统工具已选好的区域或窗口会直接显示即时编辑工具
 
 ## 隐私与部署
 
-历史默认关闭，仅启用后在图片导出时写入历史。OCR 和翻译不会自动运行；搜索、网络翻译、屏幕共享均须主动触发。工程保留原始图像，**打码后的工程仍含未打码原图**，对外分享请导出 PNG/JPG。
+历史默认关闭，仅启用后在图片导出时写入历史。OCR 和翻译不会自动运行；搜索、网络翻译均须主动触发。Wayland 截图触发临时屏幕访问，持续共享由用户单独开启。工程保留原始图像，**打码后的工程仍含未打码原图**，对外分享请导出 PNG/JPG。
 
 包构建：`tools/package-linux.sh`；AppImage：`packaging/linux/appimage.sh`；Windows 部署与安装脚本位于 `packaging/windows`。不同 Ubuntu 版本应在对应发行版或更老基线上构建，不能将 Ubuntu 26.04 编译的程序直接宣称兼容 24.04。

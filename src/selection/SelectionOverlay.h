@@ -52,6 +52,7 @@ class SelectionOverlay final : public QWidget {
     void createToolbar();
     void positionEditor();
     void copy();
+    void updateDrag(QPointF point, Qt::KeyboardModifiers modifiers);
     CaptureFrame frame;
     CaptureMode mode;
     QRectF selected, startRect;

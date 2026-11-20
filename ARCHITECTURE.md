@@ -8,8 +8,9 @@
 
 - Windows：工作线程使用 GetDC / BitBlt / GetDIBits，原生资源由 RAII 释放。每个显示器查询物理矩形，再拼接到统一像素密度的逻辑桌面。窗口矩形来自 EnumWindows 与 DWM 扩展边界。当前窗口捕获是可见桌面裁切，没有 WGC 独立离屏窗口捕获。
 - X11：RandR 匹配显示器名称与物理坐标；独立 XCB 连接获取根窗口像素与窗口边界。窗口查询失败不会触发 Xlib 默认致命错误。高 DPI 和负逻辑原点映射由 CaptureFrame 统一处理。
-- Wayland：只通过 XDG Portal 访问桌面。PortalRequest 在方法调用前订阅 Response，避免响应竞态；支持请求 Close、超时和旧路径兼容。普通截图被系统拒绝时重试交互式选择器；取消不重试。系统返回的本地 URI 在工作线程解码。
-- 快速路径：用户明确开启后，CreateSession → SelectSources → Start → OpenPipeWireRemote。授权恢复 token 每次更新；pw_thread_loop 负责视频回调，最多保留一帧。状态可见，停止时销毁流、远程 core/context 和会话。只接受可映射的 CPU RGB 帧；DMA-BUF 等不可用格式报错并可降级 Portal。
+- Wayland：普通截图执行 CreateSession → SelectSources（单显示器）→ Start → OpenPipeWireRemote，异步等待可读取的首帧，取得整屏画面后停止临时共享并创建 SnapLing 选区。首帧等待上限 10 秒。用户单独开启的持续共享复用同一来源和最新一帧，直到主动停止。授权恢复 token 每次更新，旧请求由 generation 标记隔离。
+- PortalRequest 在方法调用前订阅 Response，避免响应竞态；支持请求 Close、超时和旧路径兼容。PipeWire 的 pw_thread_loop 负责视频回调，仅缓存当前有效流的一帧，停止时销毁流、远程 core/context 和会话。只接受可映射的 CPU RGB 帧。未启用 PipeWire 的构建仅尝试非交互式 Screenshot Portal，本地 URI 在工作线程解码；拒绝时报告依赖问题。
+- ScreenCast 返回的逻辑 position/size 用于显示器坐标映射，缺失时回退主屏幕。覆盖层选择对应 QScreen 并以图像尺寸映射选区；物理多屏与混合 DPI 仍需实机验证。
 
 后台快捷键触发直接提交采集任务，采集结束才创建选区。由本程序按钮触发时先隐藏本程序窗口、等待合成器更新；延时结束也先关闭倒计时。最终图像从捕获帧生成，不对选区窗口自身截屏。首次系统授权不在本程序控制范围内。
 
@@ -17,7 +18,7 @@
 
 ## 编辑与图像
 
-`SelectionOverlay` 管理 Selecting、QuickEditing、AdvancedEditing 和 Cancelled 阶段。在冻结帧上框选后，立即创建选区内 `Canvas` 和随选区定位的浮动工具栏。Enter 或 ✅ 将共享的 `EditorSession` 交给 `EditorWindow`。系统 Portal 已完成的选区直接开始 QuickEditing。
+`SelectionOverlay` 管理 Selecting、QuickEditing、AdvancedEditing 和 Cancelled 阶段。鼠标松开时使用释放坐标完成框选，在同一遮罩中立即创建选区内 `Canvas` 和随选区定位的浮动工具栏。全屏模式直接开始 QuickEditing。Enter 或 ✅ 将共享的 `EditorSession` 交给 `EditorWindow`。
 
 `Document` 持有选区原图、标注列表、裁剪、旋转、翻转、OCR、翻译图层及历史。两个阶段持有同一个文档实例，撤销/重做保存隐式共享的状态，最多 100 步。`AnnotationTools` 在两个阶段复用工具和样式控制。
 

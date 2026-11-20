@@ -1,5 +1,4 @@
 #include "PipeWireStream.h"
-#include <QDateTime>
 #include <QMutexLocker>
 #include <pipewire/pipewire.h>
 #include <spa/param/video/format-utils.h>
@@ -16,7 +15,7 @@ struct PipeWireStream::Impl {
     spa_video_info_raw info{};
     mutable QMutex mutex;
     QImage frame;
-    qint64 timestamp = 0;
+    bool streaming = false;
     static void format(void *p, uint32_t id, const spa_pod *param) {
         auto *d = static_cast<Impl *>(p);
         if (param && id == SPA_PARAM_Format)
@@ -24,6 +23,12 @@ struct PipeWireStream::Impl {
     }
     static void state(void *p, pw_stream_state, pw_stream_state state, const char *error) {
         auto *d = static_cast<Impl *>(p);
+        {
+            QMutexLocker lock(&d->mutex);
+            d->streaming = state == PW_STREAM_STATE_STREAMING;
+            if (!d->streaming)
+                d->frame = {};
+        }
         if (state == PW_STREAM_STATE_ERROR) {
             QString e = QString::fromUtf8(error ? error : "PipeWire 会话失败");
             QMetaObject::invokeMethod(
@@ -50,7 +55,7 @@ struct PipeWireStream::Impl {
                 QImage image(static_cast<const uchar *>(v.data) + offset, w, h, stride, f);
                 QMutexLocker lock(&d->mutex);
                 d->frame = image.copy();
-                d->timestamp = QDateTime::currentMSecsSinceEpoch(); // 最多保留一帧，不发信号积压帧队列。
+                // 保留当前流的一帧，静止桌面的有效画面可直接用于下一次截图。
             }
         }
         pw_stream_queue_buffer(d->stream, b);
@@ -85,11 +90,11 @@ bool PipeWireStream::start(int fd, uint node, const QString &serial, QString &er
         stop();
         return false;
     }
-    QByteArray target = (serial.isEmpty() ? QString::number(node) : serial).toUtf8();
-    d.stream = pw_stream_new(d.core, "SnapLing capture",
-                             pw_properties_new(PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY, "Capture",
-                                               PW_KEY_MEDIA_ROLE, "Screen", PW_KEY_TARGET_OBJECT,
-                                               target.constData(), nullptr));
+    auto *properties = pw_properties_new(PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY, "Capture",
+                                         PW_KEY_MEDIA_ROLE, "Screen", nullptr);
+    if (!serial.isEmpty())
+        pw_properties_set(properties, PW_KEY_TARGET_OBJECT, serial.toUtf8().constData());
+    d.stream = pw_stream_new(d.core, "SnapLing capture", properties);
     if (!d.stream) {
         error = "无法创建 PipeWire 视频流";
         stop();
@@ -113,7 +118,7 @@ bool PipeWireStream::start(int fd, uint node, const QString &serial, QString &er
         SPA_POD_CHOICE_ENUM_Id(4, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRA, SPA_VIDEO_FORMAT_RGBx,
                                SPA_VIDEO_FORMAT_RGBA)));
     int result = pw_stream_connect(
-        d.stream, PW_DIRECTION_INPUT, node,
+        d.stream, PW_DIRECTION_INPUT, serial.isEmpty() ? node : PW_ID_ANY,
         static_cast<pw_stream_flags>(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS), &param, 1);
     if (result < 0 || pw_thread_loop_start(d.loop) < 0) {
         error = "PipeWire 视频流启动失败";
@@ -145,11 +150,11 @@ void PipeWireStream::stop() {
     }
     QMutexLocker lock(&d.mutex);
     d.frame = {};
-    d.timestamp = 0;
+    d.streaming = false;
 }
 QImage PipeWireStream::latest() const {
     QMutexLocker lock(&impl->mutex);
-    if (QDateTime::currentMSecsSinceEpoch() - impl->timestamp > 100)
+    if (!impl->streaming)
         return {};
     return impl->frame;
 }

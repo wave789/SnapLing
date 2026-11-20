@@ -28,8 +28,9 @@
 #include <QTimer>
 #include <QVBoxLayout>
 namespace SnapLing {
-Application::Application(QObject *p)
-    : QObject(p), config(settings.provider()), backend(createCaptureBackend()),
+Application::Application(QObject *p, std::unique_ptr<ICaptureBackend> captureBackend)
+    : QObject(p), config(settings.provider()),
+      backend(captureBackend ? std::move(captureBackend) : createCaptureBackend()),
       hotkey(createHotkeyBackend()) {
     main.setWindowTitle("SnapLing · 智能截图");
     main.setWindowIcon(QIcon(":/snapling.svg"));
@@ -146,7 +147,7 @@ Application::Application(QObject *p)
         }
         qInfo("capture_ms=%lld trigger_to_pixels_ms=%lld", frame.captureMs, captureTimer.elapsed());
         if (pendingMode == CaptureMode::Window && !backend->hasWindowPicking())
-            status->setText("Wayland 窗口由系统选择器决定；若系统未提供窗口选择，可在冻结图像上框选。");
+            status->setText("在 SnapLing 选区中框选窗口内容，松开鼠标后即可标注。");
         auto session = std::make_shared<EditorSession>(QImage(), settings, config);
         auto *overlay = new SelectionOverlay(std::move(frame), pendingMode, nullptr, session);
         connect(overlay, &SelectionOverlay::advancedRequested, this, [this](auto session) {

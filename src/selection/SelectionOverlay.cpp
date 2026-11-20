@@ -45,7 +45,11 @@ SelectionOverlay::SelectionOverlay(CaptureFrame f, CaptureMode m, QWidget *paren
     setCursor(Qt::CrossCursor);
     setFocusPolicy(Qt::StrongFocus);
     if (QGuiApplication::platformName().contains("wayland")) {
-        setGeometry(QGuiApplication::primaryScreen()->geometry());
+        auto *screen = QGuiApplication::screenAt(frame.desktop.center().toPoint());
+        if (!screen)
+            screen = QGuiApplication::primaryScreen();
+        setScreen(screen);
+        setGeometry(screen->geometry());
         showFullScreen();
     } else {
         setGeometry(frame.desktop.toAlignedRect());
@@ -175,30 +179,7 @@ void SelectionOverlay::mouseMoveEvent(QMouseEvent *e) {
     cursor = e->position();
     auto point = imagePoint(e->position());
     if (dragging) {
-        if (moving) {
-            selected = startRect.translated(point - anchor);
-            if (!points.isEmpty()) {
-                auto delta = selected.topLeft() - points.boundingRect().topLeft();
-                points.translate(delta);
-            }
-        } else if (resizing)
-            selected = QRectF(startRect.topLeft(), point).normalized();
-        else if (mode == CaptureMode::Freehand) {
-            points << point;
-            selected = points.boundingRect();
-        } else
-            selected = QRectF(anchor, point).normalized();
-        // 邻近图像边界吸附，Alt 可暂时关闭。
-        if (!(e->modifiers() & Qt::AltModifier) && !moving && mode != CaptureMode::Freehand) {
-            if (selected.left() < 6)
-                selected.setLeft(0);
-            if (selected.top() < 6)
-                selected.setTop(0);
-            if (frame.image.width() - selected.right() < 6)
-                selected.setRight(frame.image.width());
-            if (frame.image.height() - selected.bottom() < 6)
-                selected.setBottom(frame.image.height());
-        }
+        updateDrag(point, e->modifiers());
     } else if (mode == CaptureMode::Window) {
         for (auto w : frame.windows) {
             auto global = QPointF(frame.desktop.x() + e->position().x() * frame.desktop.width() / width(),
@@ -211,7 +192,37 @@ void SelectionOverlay::mouseMoveEvent(QMouseEvent *e) {
     }
     update();
 }
-void SelectionOverlay::mouseReleaseEvent(QMouseEvent *) {
+void SelectionOverlay::updateDrag(QPointF point, Qt::KeyboardModifiers modifiers) {
+    if (moving) {
+        selected = startRect.translated(point - anchor);
+        if (!points.isEmpty()) {
+            auto delta = selected.topLeft() - points.boundingRect().topLeft();
+            points.translate(delta);
+        }
+    } else if (resizing)
+        selected = QRectF(startRect.topLeft(), point).normalized();
+    else if (mode == CaptureMode::Freehand) {
+        points << point;
+        selected = points.boundingRect();
+    } else
+        selected = QRectF(anchor, point).normalized();
+    // 邻近图像边界吸附，Alt 可暂时关闭。
+    if (!(modifiers & Qt::AltModifier) && !moving && mode != CaptureMode::Freehand) {
+        if (selected.left() < 6)
+            selected.setLeft(0);
+        if (selected.top() < 6)
+            selected.setTop(0);
+        if (frame.image.width() - selected.right() < 6)
+            selected.setRight(frame.image.width());
+        if (frame.image.height() - selected.bottom() < 6)
+            selected.setBottom(frame.image.height());
+    }
+}
+void SelectionOverlay::mouseReleaseEvent(QMouseEvent *event) {
+    if (currentPhase != Phase::Selecting || event->button() != Qt::LeftButton)
+        return;
+    if (dragging)
+        updateDrag(imagePoint(event->position()), event->modifiers());
     dragging = false;
     moving = false;
     resizing = false;

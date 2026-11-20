@@ -16,7 +16,7 @@ class EditorSession;
 class Application final : public QObject {
     Q_OBJECT
   public:
-    explicit Application(QObject *parent = nullptr);
+    explicit Application(QObject *parent = nullptr, std::unique_ptr<ICaptureBackend> captureBackend = {});
     ~Application() override;
     void command(QStringList args);
     void show();
