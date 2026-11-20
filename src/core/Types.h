@@ -30,6 +30,7 @@ struct CaptureFrame {
     QRectF desktop; // 全局逻辑坐标，像素/逻辑比例按实际图像计算。
     QVector<WindowInfo> windows;
     qint64 captureMs = 0;
+    bool selectionComplete = false; // 系统交互式截图已完成区域或窗口选择。
     QPointF toPixel(QPointF global) const;
     QRect pixelRect(QRectF global) const;
 };

@@ -56,6 +56,8 @@ snapling --quit
 4. 编辑器选择工具后绘制；「选择」工具移动标注，Delete 删除；双击文字修改；Ctrl+Z / Ctrl+Shift+Z 撤销/重做。
 5. Ctrl+C 在 OCR 选中文字时复制文字，其余情况复制图片；保存图片或可编辑工程。
 
+Wayland 系统截图工具完成区域或窗口截图后，SnapLing 直接打开编辑器。椭圆、多边形和自由曲线在冻结图像上完成形状选择。
+
 ## 离线 OCR
 
 模型随源码提供，约 6.4 MiB，安装至 `share/snapling/tessdata`，无需联网下载。首次点击 OCR 才加载模型。手动导入时选择含 `eng.traineddata` / `chi_sim.traineddata` 的目录。来源、许可证、大小和 SHA256 见 [models/README.md](models/README.md)。

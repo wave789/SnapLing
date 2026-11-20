@@ -87,7 +87,7 @@ void WaylandCapture::portalCapture(CaptureMode mode, bool interactive) {
                           return;
                       }
                       auto *w = new QFutureWatcher<QImage>(this);
-                      connect(w, &QFutureWatcher<QImage>::finished, this, [this, w, job] {
+                      connect(w, &QFutureWatcher<QImage>::finished, this, [this, w, job, mode, interactive] {
                           auto image = w->result();
                           w->deleteLater();
                           if (job != generation)
@@ -99,6 +99,8 @@ void WaylandCapture::portalCapture(CaptureMode mode, bool interactive) {
                           CaptureFrame f;
                           f.image = image;
                           f.desktop = QRectF(QPointF(0, 0), image.size());
+                          f.selectionComplete = interactive &&
+                                                (mode == CaptureMode::Region || mode == CaptureMode::Window);
                           emit captured(f);
                       });
                       w->setFuture(QtConcurrent::run(&workerPool, [path = uri.toLocalFile()] {

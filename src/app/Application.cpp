@@ -145,7 +145,7 @@ Application::Application(QObject *p)
             return;
         }
         qInfo("capture_ms=%lld trigger_to_pixels_ms=%lld", frame.captureMs, captureTimer.elapsed());
-        if (pendingMode == CaptureMode::FullScreen) {
+        if (pendingMode == CaptureMode::FullScreen || frame.selectionComplete) {
             capturing = false;
             restoreWindows();
             edit(frame.image, pendingOcr, pendingTranslation);
@@ -197,9 +197,11 @@ Application::Application(QObject *p)
 Application::~Application() {
     backend->cancel();
     hotkey->unbind();
+    QList<EditorWindow *> editors;
     for (auto *w : QApplication::topLevelWidgets())
-        if (w != &main && qobject_cast<EditorWindow *>(w))
-            delete w;
+        if (auto *editor = qobject_cast<EditorWindow *>(w))
+            editors << editor;
+    qDeleteAll(editors);
     QThreadPool::globalInstance()->waitForDone();
 }
 void Application::bindHotkeys() {

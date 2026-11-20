@@ -11,6 +11,8 @@ CTest 使用 offscreen Qt 平台，但执行真实图片算法、序列化与离
 
 HTTP 测试服务器仅作为 **测试替身**，生产代码通过 QNetworkAccessManager 访问用户配置的真实服务。模型/服务响应验证和本地请求测试不能代替 Ollama 或远程实际模型验收。
 
+安装了 `dbus-run-session` 时，CTest 还运行截图流程回归测试。测试在独立 D-Bus 会话中模拟 Screenshot Portal 响应，调用实际应用入口，验证系统区域/窗口截图直接打开编辑器、自定义形状进入选区、取消后重试以及编辑器退出时的窗口释放。这些响应来自测试替身，GNOME 系统截图授权仍需实机验收。
+
 桌面测试在独立 Xvfb 1920×1080 根窗口上创建真实 QWidget 与 QMenu，再由生产 XCB 后端采集屏幕。校验菜单仍可见、菜单像素一致、区域选择、箭头编辑、PNG/JPG/工程保存重载、剪贴板、真实中英文 OCR、鼠标拖选中文及 Ctrl+C。使用 xdotool 发送实际 X11 按键，验证 XGrabKey 和冲突。25 次采集同时记录采集耗时、选区首帧耗时及 RSS 变化。测试图像不是用户桌面，不包含用户内容。
 
 实际主程序端到端测试还可在独立 Xvfb 中运行 `python3 tools/test-application.py`，需要 Pillow 和 xdotool；它会启动单独的目标应用、通过 IPC 截图，并在 GUI 中标注和保存。
