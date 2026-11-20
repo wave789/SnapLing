@@ -15,6 +15,7 @@
 #include <QDateTime>
 #include <QDialogButtonBox>
 #include <QFile>
+#include <QFileInfo>
 #include <QFileDialog>
 #include <QHBoxLayout>
 #include <QLineEdit>
@@ -30,11 +31,27 @@
 #include <QVBoxLayout>
 #include <QWindow>
 namespace SnapLing {
+#ifndef Q_OS_WIN
+static bool isGnomeSession() {
+    const auto desktops = qEnvironmentVariable("XDG_CURRENT_DESKTOP").split(':', Qt::SkipEmptyParts);
+    if (!desktops.isEmpty())
+        return desktops.contains("GNOME", Qt::CaseInsensitive);
+    // Some terminal launchers preserve only the login session name.
+    auto session = qEnvironmentVariable("XDG_SESSION_DESKTOP");
+    if (session.isEmpty())
+        session = qEnvironmentVariable("DESKTOP_SESSION");
+    session = QFileInfo(session).completeBaseName().toLower();
+    const QStringList gnomeSessions{"gnome", "gnome-wayland", "gnome-xorg", "gnome-classic",
+                                    "ubuntu", "ubuntu-wayland", "ubuntu-xorg"};
+    return gnomeSessions.contains(session);
+}
+#endif
 Application::Application(QObject *p, std::unique_ptr<ICaptureBackend> captureBackend)
     : QObject(p), config(settings.provider()),
       backend(captureBackend ? std::move(captureBackend) : createCaptureBackend()),
       hotkey(createHotkeyBackend()) {
     main.setWindowTitle("SnapLing · 智能截图");
+    main.setObjectName("snaplingMainWindow");
     main.setWindowIcon(QIcon(":/snapling.svg"));
     main.resize(680, 500);
     main.installEventFilter(this);
@@ -80,6 +97,7 @@ Application::Application(QObject *p, std::unique_ptr<ICaptureBackend> captureBac
     connect(qApp, &QGuiApplication::screenRemoved, this, [refreshScreens](QScreen *) { refreshScreens(); });
     row->addWidget(screenBox);
     auto *captureButton = new QPushButton("开始截图");
+    captureButton->setObjectName("captureButton");
     captureButton->setDefault(true);
     captureButton->setMinimumHeight(42);
     row->addWidget(captureButton);
@@ -151,6 +169,14 @@ Application::Application(QObject *p, std::unique_ptr<ICaptureBackend> captureBac
     layout->addWidget(capabilities);
 #ifndef Q_OS_WIN
     if (auto *wayland = qobject_cast<WaylandCapture *>(backend.get())) {
+        connect(qApp, &QGuiApplication::focusWindowChanged, this, [this] {
+            if (consent == Consent::WaitingForFocus)
+                QTimer::singleShot(0, this, &Application::requestConsentWhenFocused);
+        });
+        connect(wayland, &WaylandCapture::screenshotAuthorized, this, [this] {
+            if (preparing && consent == Consent::Requesting)
+                prepareDesktopCapture();
+        });
         capabilities->setText(capabilities->text() + "\n" + wayland->capabilities());
         auto *regrant = new QPushButton("重新请求截图授权");
         regrant->setObjectName("retryScreenshotPermission");
@@ -163,14 +189,17 @@ Application::Application(QObject *p, std::unique_ptr<ICaptureBackend> captureBac
             }
             status->setStyleSheet({});
             status->setText("正在重新请求 SnapLing 的系统截图授权…");
+            preparing = true;
             wayland->resetScreenshotPermission();
         });
         connect(wayland, &WaylandCapture::screenshotPermissionReset, this, [this, wayland] {
+            preparing = false;
             wayland->setMethod(WaylandCapture::Method::Screenshot);
             settings.set("capture/waylandMethod", "screenshot");
             if (auto *button = main.findChild<QPushButton *>("resetCompatibilityCapture"))
                 button->hide();
-            capture(CaptureMode(modeBox->currentIndex()));
+            // The user explicitly requested consent in this window, even on an unidentified desktop.
+            capture(CaptureMode(modeBox->currentIndex()), false, false, 0, true);
         });
         auto *reselect = new QPushButton("重置兼容截图授权");
         reselect->setObjectName("resetCompatibilityCapture");
@@ -217,6 +246,7 @@ Application::Application(QObject *p, std::unique_ptr<ICaptureBackend> captureBac
         capturing = false;
         closeCaptureOverlays();
         preparing = false;
+        finishConsent();
         restoreWindows();
         show();
         if (tray.isVisible())
@@ -302,6 +332,12 @@ void Application::show() {
     }
 }
 bool Application::eventFilter(QObject *o, QEvent *e) {
+    if (consent == Consent::WaitingForFocus &&
+        ((o == &main && e->type() == QEvent::WindowActivate) ||
+         (o == main.windowHandle() && e->type() == QEvent::Expose)))
+        QTimer::singleShot(0, this, &Application::requestConsentWhenFocused);
+    if (o == &main && e->type() == QEvent::Close && consent != Consent::None)
+        cancelCapture();
     if (o == &main && e->type() == QEvent::Close && settings.value("general/background", true).toBool()) {
         main.hide();
         static_cast<QCloseEvent *>(e)->ignore();
@@ -311,8 +347,13 @@ bool Application::eventFilter(QObject *o, QEvent *e) {
         QTimer::singleShot(0, qApp, &QCoreApplication::quit);
     return QObject::eventFilter(o, e);
 }
-void Application::capture(CaptureMode mode, bool ocr, bool translate, int delay) {
+void Application::capture(CaptureMode mode, bool ocr, bool translate, int delay, bool explicitConsent) {
     if (capturing || countdown || preparing) {
+        if (consent == Consent::WaitingForFocus) {
+            show();
+            requestConsentWhenFocused();
+            return;
+        }
         if (!captureOverlays.isEmpty()) {
             for (qsizetype i = 0; i < captureOverlays.size(); ++i) {
                 auto overlay = captureOverlays[i];
@@ -337,20 +378,76 @@ void Application::capture(CaptureMode mode, bool ocr, bool translate, int delay)
         return;
     }
     preparing = true;
+    ++captureGeneration;
     status->setStyleSheet({});
     status->setText("正在获取桌面截图… 如系统显示截图授权窗口，请完成授权。");
     captureTimer.start();
     pendingMode = mode;
     pendingOcr = ocr;
     pendingTranslation = translate;
-    // 不显示或激活本程序任何窗口，先采集当前桌面；从本程序按钮触发时先隐藏自身窗口。
-    bool ownVisible = false;
+    pendingDelay = delay;
+    pendingScreen = screenBox->currentData().toInt();
+#ifndef Q_OS_WIN
+    auto *wayland = qobject_cast<WaylandCapture *>(backend.get());
+    if (wayland && wayland->usesScreenshot() && (explicitConsent || isGnomeSession())) {
+        consent = Consent::Checking;
+        wayland->checkScreenshotPermission([this, job = captureGeneration](bool needsConsent) {
+            if (!preparing || job != captureGeneration || consent != Consent::Checking)
+                return;
+            if (!needsConsent) {
+                prepareDesktopCapture();
+                return;
+            }
+            // GNOME Shell verifies the focused application's desktop ID before it opens AccessDialog.
+            mainShownForConsent = !main.isVisible();
+            mainWasMinimized = main.isMinimized();
+            consent = Consent::WaitingForFocus;
+            status->setText("首次截图需要系统授权。请点击此窗口，然后在系统询问时允许 SnapLing 截图。");
+            show();
+            if (auto *window = main.windowHandle())
+                window->installEventFilter(this);
+            QTimer::singleShot(0, this, &Application::requestConsentWhenFocused);
+        });
+        return;
+    }
+#else
+    Q_UNUSED(explicitConsent)
+#endif
+    prepareDesktopCapture();
+}
+void Application::requestConsentWhenFocused() {
+#ifndef Q_OS_WIN
+    auto *window = main.windowHandle();
+    if (consent != Consent::WaitingForFocus || !window || !window->isExposed() ||
+        !main.isActiveWindow() || QGuiApplication::focusWindow() != window)
+        return;
+    consent = Consent::Requesting;
+    status->setText("请在系统窗口中允许 SnapLing 截图。授权完成后将自动截取桌面。");
+    qInfo("screenshot_consent=focused");
+    static_cast<WaylandCapture *>(backend.get())->authorizeScreenshot();
+#endif
+}
+bool Application::finishConsent() {
+    const bool usedMain = consent == Consent::WaitingForFocus || consent == Consent::Requesting;
+    consent = Consent::None;
+    if (usedMain) {
+        if (mainShownForConsent)
+            main.hide();
+        if (mainWasMinimized)
+            main.setWindowState(main.windowState() | Qt::WindowMinimized);
+    }
+    return usedMain;
+}
+void Application::prepareDesktopCapture() {
+    bool ownVisible = finishConsent();
+    status->setText("正在获取桌面截图…");
     for (auto *w : QApplication::topLevelWidgets())
         if (w->isVisible() && w->windowType() != Qt::Popup) {
             ownVisible = true;
             hiddenWindows << w;
             w->hide();
         }
+    const int delay = pendingDelay;
     if (delay > 0) {
         remaining = delay;
         countdown = new QProgressDialog("延时截图倒计时：" + QString::number(remaining) + " 秒", "取消", 0,
@@ -379,7 +476,7 @@ void Application::capture(CaptureMode mode, bool ocr, bool translate, int delay)
                 captureTimer.start();
                 d->hide();
                 d->deleteLater();
-                QTimer::singleShot(160, this, &Application::beginCapture);
+                scheduleCapture(160);
             } else {
                 countdown->setLabelText(QString("延时截图：%1 秒，可取消").arg(remaining));
                 countdown->setValue(delay - remaining);
@@ -390,9 +487,15 @@ void Application::capture(CaptureMode mode, bool ocr, bool translate, int delay)
         return;
     }
     if (ownVisible)
-        QTimer::singleShot(120, this, &Application::beginCapture);
+        scheduleCapture(120);
     else
         beginCapture();
+}
+void Application::scheduleCapture(int milliseconds) {
+    QTimer::singleShot(milliseconds, this, [this, job = captureGeneration] {
+        if (job == captureGeneration)
+            beginCapture();
+    });
 }
 void Application::restoreWindows() {
     auto windows = hiddenWindows;
@@ -497,7 +600,7 @@ void Application::beginCapture() {
     if (capturing)
         return;
     capturing = true;
-    int screen = screenBox->currentData().toInt();
+    int screen = pendingScreen;
     if (screen == -2) {
         auto screens = QGuiApplication::screens();
         screen = screens.indexOf(QGuiApplication::primaryScreen());
@@ -570,6 +673,7 @@ void Application::applyTheme() {
         qApp->setStyleSheet("");
 }
 void Application::cancelCapture() {
+    ++captureGeneration;
     preparing = false;
     capturing = false;
     captureActivationToken.clear();
@@ -579,6 +683,7 @@ void Application::cancelCapture() {
         countdown = nullptr;
     }
     backend->cancel();
+    finishConsent();
     closeCaptureOverlays();
     restoreWindows();
 }

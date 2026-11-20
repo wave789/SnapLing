@@ -73,6 +73,8 @@ Wayland 默认请求非交互式 Screenshot，后台解码完整桌面，按 Qt 
 
 若终端显示 `portal_screenshot_response code=2 has_uri=0`，表示系统没有交付图片，还没有进入多屏选区阶段。响应码 2 也可能来自截图服务错误，不能单凭此码断言权限被拒绝。新版会读取权限库并打印 `screenshot_permission app=... unidentified_host=...`；主界面的「重新请求截图授权」只清空 `io.snapling.SnapLing` 自己的截图授权决定，然后由系统重新询问，不直接写入允许，也不修改其他应用或未识别主机应用的记录。
 
+**Ubuntu GNOME 首次截图**时，按 `Ctrl+Alt+A` 或点击「开始截图」，在系统弹窗中允许 SnapLing 截图。如果桌面只提示 SnapLing 窗口已就绪，点击其主窗口即可继续授权。授权完成后，SnapLing 自动隐藏窗口并重新截取桌面，进入原先选择的截图模式。GNOME 可能将首次授权产生的图片也放进系统「图片」目录。系统记住允许后，后续快捷键直接截取当前桌面。
+
 从源码运行时，`tools/run.sh` 会在启动 Qt 前自动准备 `io.snapling.SnapLing.desktop`，无需 sudo 或先安装整个项目：
 
 ```bash

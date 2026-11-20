@@ -25,7 +25,9 @@ HTTP 测试服务器仅作为 **测试替身**，生产代码通过 QNetworkAcce
 /usr/bin/python3 tools/test-portal-identity.py --portal /usr/libexec/xdg-desktop-portal
 ```
 
-工具会启动私有 D-Bus、独立 XDG 目录和真实 Portal 前端。权限库、Access 授权应答和 Screenshot 图像均来自测试替身；先验证空身份被记住的拒绝，以及缺失桌面入口时 Register 返回 App info not found。随后在该 Portal 仍运行时执行生产 `tools/install-desktop.sh`，验证 Gio 可识别入口，再运行生产 WaylandCapture，断言授权请求与截图后端收到的 app ID 均为 io.snapling.SnapLing，返回图像且共用拒绝记录未改变。它不会连接用户的桌面总线或截取用户屏幕，也不代表 GNOME 后端/物理三屏已通过。Portal 可执行文件路径按发行版调整。
+工具会在私有 D-Bus、独立 XDG 目录中启动真实 Portal 前端。权限库、Access 和 Screenshot 后端使用测试替身。测试先复现缺少桌面入口的注册错误，再执行生产入口安装脚本。已注册的后台应用请求截图时，Access 按 GNOME 的焦点规则拒绝，前端返回 `code=2`，权限仍为 `unset`。随后测试通过生产 `Application` 触发截图，Access 在主窗口获得焦点后同意。截图后端按主窗口是否可见返回不同颜色的图片，测试验证编辑器只收到隐藏窗口后获取的图片。测试不会接触用户桌面。Portal 可执行文件路径按发行版调整。
+
+另在隔离的 GNOME Shell/Mutter 48.7 Wayland 会话中运行了 SnapLing、Ubuntu 26.04 的 xdg-desktop-portal 1.21.1、GNOME 截图后端 48.0 和真实权限库。在其他应用拥有焦点时，已注册的后台截图请求返回 2，系统日志为 `Only the focused app is allowed to show a system access dialog`。新流程在主窗口获得焦点后显示 GNOME 授权弹窗。用鼠标点击允许，SnapLing 隐藏主窗口，取得三个 800×600 虚拟显示器的 2400×600 桌面图。在第三屏拖选后立即出现标注工具栏。再次触发时只请求一次截图。此桌面验证使用命令触发和鼠标操作，物理外接显示器与用户设备上的系统快捷键仍需实机验证。[系统授权弹窗](docs/validation/gnome-screenshot-consent.jpg) · [第三屏拖选后的工具栏](docs/validation/gnome-third-display-edit.jpg)
 
 用户目录安装验证包含带空格的临时前缀：使用真实 Gio.DesktopAppInfo 读取生成的 desktop 文件，并通过该入口以 `--version` 启动已安装程序，检查绝对 Exec 路径、引号和安装 manifest。不要只用文件是否存在代替桌面入口有效性检查。
 

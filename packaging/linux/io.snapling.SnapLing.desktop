@@ -7,6 +7,7 @@ Icon=snapling
 Categories=Graphics;Utility;
 Terminal=false
 StartupNotify=true
+StartupWMClass=SnapLing
 Actions=Capture;OCR;
 [Desktop Action Capture]
 Name=截图

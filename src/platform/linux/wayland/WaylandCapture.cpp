@@ -108,7 +108,7 @@ void WaylandCapture::capture(CaptureMode, int screen) {
         ++generation;
         frameWait.start();
         qInfo("capture_backend=screenshot screens=%lld target=%d", qlonglong(layout.size()), screen);
-        portalCapture();
+        portalCapture(ScreenshotPurpose::Capture);
         return;
     }
 #ifdef SNAPLING_HAVE_PIPEWIRE
@@ -124,7 +124,30 @@ void WaylandCapture::capture(CaptureMode, int screen) {
     failSharing("此构建未启用 PipeWire，请在设置中使用系统单次截图。");
 #endif
 }
-void WaylandCapture::portalCapture() {
+void WaylandCapture::checkScreenshotPermission(std::function<void(bool)> callback) {
+    lookupScreenshotPermission([this, callback = std::move(callback)](QString own, QString, QString error) {
+        if (own == "ask") {
+            failSharing("系统设置为每次截图都询问。要在其他窗口上即时截图，请点击“重新请求截图授权”，并在系统询问是否允许随时截图时选择允许。");
+            return;
+        }
+        // A missing entry or unreadable store can require a prompt. Ask with our window focused.
+        // An explicit denial is left to the normal capture error / user-initiated reset flow.
+        const bool needsConsent = own != "yes" && own != "no";
+        qInfo("screenshot_permission_preflight app=%s foreground_consent=%d",
+              error.isEmpty() ? qPrintable(own) : "unknown", needsConsent);
+        callback(needsConsent);
+    });
+}
+void WaylandCapture::authorizeScreenshot() {
+    if (!usesScreenshot() || capturePending || resettingPermission || starting) {
+        emit failed("当前无法请求截图授权，请先完成或取消正在进行的请求。");
+        return;
+    }
+    ++generation;
+    capturePending = true;
+    portalCapture(ScreenshotPurpose::Authorize);
+}
+void WaylandCapture::portalCapture(ScreenshotPurpose purpose) {
     const auto job = generation;
     if (!screenshotConnection) {
         screenshotConnection = std::make_unique<PortalConnection>(applicationId);
@@ -133,29 +156,29 @@ void WaylandCapture::portalCapture() {
                 failSharing("系统截图服务已重启，请重新截图。");
         });
     }
-    screenshotConnection->ensureRegistered(this, [this, job](QString error) {
+    screenshotConnection->ensureRegistered(this, [this, job, purpose](QString error) {
         if (job != generation)
             return;
         if (!error.isEmpty()) {
             failSharing(error);
             return;
         }
-        requestScreenshot();
+        requestScreenshot(purpose);
     });
 }
-void WaylandCapture::requestScreenshot() {
+void WaylandCapture::requestScreenshot(ScreenshotPurpose purpose) {
     const auto job = generation;
     request = new PortalRequest(screenshotConnection->bus(), this);
     request->call("org.freedesktop.portal.Screenshot", "Screenshot", {QString()},
                   {{"interactive", false}, {"modal", false}},
-                  [this, job](uint code, QVariantMap data, QString error) {
+                  [this, job, purpose](uint code, QVariantMap data, QString error) {
         if (job != generation)
             return;
         request = nullptr;
         qInfo("portal_screenshot_response code=%u has_uri=%d", code, data.contains("uri"));
         if (code) {
             if (code == 2 && error.isEmpty())
-                reportScreenshotFailure("系统未提供截图（Portal 响应码 2）。");
+                reportScreenshotFailure(purpose);
             else
                 failSharing(error.isEmpty() ? QString("系统截图授权已取消（Portal 响应码 %1）。").arg(code)
                                             : "系统截图失败：" + error);
@@ -164,6 +187,13 @@ void WaylandCapture::requestScreenshot() {
         const QUrl uri(data["uri"].toString());
         if (!uri.isLocalFile()) {
             failSharing("系统未返回有效的本地截图文件");
+            return;
+        }
+        if (purpose == ScreenshotPurpose::Authorize) {
+            // The foreground authorization window may be in this image. Never hand it to an editor.
+            capturePending = false;
+            qInfo("portal_screenshot_consent=granted");
+            emit screenshotAuthorized();
             return;
         }
         struct Result { CaptureFrame frame; QString error; QSize pixels; QRectF desktop; };
@@ -238,24 +268,28 @@ void WaylandCapture::requestScreenshot() {
         }));
     });
 }
-void WaylandCapture::reportScreenshotFailure(QString error) {
+void WaylandCapture::lookupScreenshotPermission(std::function<void(QString, QString, QString)> callback) {
     const auto job = generation;
     auto message = QDBusMessage::createMethodCall(permissionService, permissionPath, permissionService, "Lookup");
     message.setArguments({QString("screenshot"), QString("screenshot")});
     auto *watcher = new QDBusPendingCallWatcher(QDBusConnection::sessionBus().asyncCall(message, 2500), this);
-    connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, watcher, job, error] {
+    connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, watcher, job, callback = std::move(callback)] {
         const auto reply = watcher->reply();
         watcher->deleteLater();
         if (job != generation)
             return;
+        if (reply.errorName() == "org.freedesktop.portal.Error.NotFound") {
+            callback("unset", "unset", {});
+            return;
+        }
         if (reply.type() == QDBusMessage::ErrorMessage || reply.arguments().isEmpty()) {
             qWarning("screenshot_permission_lookup_failed=%s", qPrintable(reply.errorName()));
-            failSharing(error + "无法读取系统权限记录。请查看系统截图服务日志，或点击“重新请求截图授权”后重试。");
+            callback({}, {}, "无法读取系统权限记录。请查看系统截图服务日志，或点击“重新请求截图授权”后重试。");
             return;
         }
         const auto argument = qvariant_cast<QDBusArgument>(reply.arguments().first());
         if (argument.currentSignature() != "a{sas}") {
-            failSharing(error + "系统权限记录格式无效，请查看系统截图服务日志。");
+            callback({}, {}, "系统权限记录格式无效，请查看系统截图服务日志。");
             return;
         }
         QStringList own, host;
@@ -272,14 +306,32 @@ void WaylandCapture::reportScreenshotFailure(QString error) {
                 host = permissions;
         }
         argument.endMap();
-        auto decision = [](const QStringList &values) {
-            return values.contains("no") ? "no" : values.contains("yes") ? "yes" : "unset";
+        auto decision = [](const QStringList &values) -> QString {
+            if (values.size() == 1 && (values.first() == "no" || values.first() == "yes" || values.first() == "ask"))
+                return values.first();
+            return "unset";
         };
-        qInfo("screenshot_permission app=%s unidentified_host=%s", decision(own), decision(host));
-        if (own.contains("no"))
+        callback(decision(own), decision(host), {});
+    });
+}
+void WaylandCapture::reportScreenshotFailure(ScreenshotPurpose purpose) {
+    lookupScreenshotPermission([this, purpose](QString own, QString host, QString lookupError) {
+        const QString error = "系统未提供截图（Portal 响应码 2）。";
+        if (!lookupError.isEmpty()) {
+            failSharing(error + lookupError);
+            return;
+        }
+        qInfo("screenshot_permission app=%s unidentified_host=%s", qPrintable(own), qPrintable(host));
+        if (own == "no")
             failSharing(error + "系统已记住对 SnapLing 截图权限的拒绝，不会再次弹窗。请点击“重新请求截图授权”，然后在系统弹窗中允许截图。");
-        else if (host.contains("no") && !screenshotConnection->hasRegisteredIdentity())
+        else if (host == "no" && !screenshotConnection->hasRegisteredIdentity())
             failSharing(error + "系统对未识别主机应用保存了拒绝记录。需检查 SnapLing 的桌面安装和应用身份；不会自动修改其他应用共用的权限。请复制终端日志排查。");
+        else if (screenshotConnection->hasRegisteredIdentity() && own == "yes")
+            failSharing(error + "截图连接已注册，系统记录为允许。请在终端查看本次截图服务错误：\n"
+                        "journalctl --user -b -u xdg-desktop-portal -u xdg-desktop-portal-gnome -n 40 --no-pager");
+        else if (purpose == ScreenshotPurpose::Authorize && own == "unset")
+            failSharing(error + "系统尚未返回 SnapLing 的授权决定。请点击主窗口的“开始截图”，保持它在前台，直到系统显示授权窗口。"
+                        "如果仍无弹窗，请运行：\njournalctl --user -b -u xdg-desktop-portal -u xdg-desktop-portal-gnome -n 40 --no-pager");
         else if (screenshotConnection->hasRegisteredIdentity())
             failSharing(error + "本次截图连接已注册为 SnapLing，未发现 SnapLing 的已保存拒绝。请查看系统截图服务日志；未识别主机应用的拒绝记录不用于本次请求。");
         else

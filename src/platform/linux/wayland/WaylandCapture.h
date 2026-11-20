@@ -29,6 +29,9 @@ class WaylandCapture final : public ICaptureBackend {
     void stopSharing();
     void resetScreenSelection();
     void resetScreenshotPermission();
+    bool usesScreenshot() const { return method == Method::Screenshot; }
+    void checkScreenshotPermission(std::function<void(bool needsConsent)> callback);
+    void authorizeScreenshot();
     bool sharing() const {
         return active;
     }
@@ -38,13 +41,16 @@ class WaylandCapture final : public ICaptureBackend {
   signals:
     void sharingChanged(bool active);
     void screenshotPermissionReset();
+    void screenshotAuthorized();
   private slots:
     void sessionClosed(const QDBusMessage &message);
 
   private:
-    void portalCapture();
-    void requestScreenshot();
-    void reportScreenshotFailure(QString error);
+    enum class ScreenshotPurpose { Capture, Authorize };
+    void portalCapture(ScreenshotPurpose purpose);
+    void requestScreenshot(ScreenshotPurpose purpose);
+    void lookupScreenshotPermission(std::function<void(QString own, QString host, QString error)> callback);
+    void reportScreenshotFailure(ScreenshotPurpose purpose);
     void beginSharing(bool temporary);
     void resetSharing();
     void failSharing(QString error);

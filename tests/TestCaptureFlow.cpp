@@ -170,6 +170,10 @@ class ScreenshotPortal : public QObject, protected QDBusContext {
     PermissionStorePortal *permissions = nullptr;
     RegistryState *registry = nullptr;
     bool respectPermissions = false;
+    // Model GNOME Shell's AccessDialog focus check only in the GNOME consent tests.
+    QPointer<QMainWindow> consentWindow;
+    QString consentFrameUri;
+    QList<bool> focusedAtRequest, visibleAtRequest;
   public slots:
     QDBusObjectPath Screenshot(const QString &, const QVariantMap &options) {
         requests << options["interactive"].toBool();
@@ -181,8 +185,24 @@ class ScreenshotPortal : public QObject, protected QDBusContext {
         registry->screenshotSenders << caller;
         const auto id = registry->identities.value(caller);
         const bool denied = respectPermissions && permissions->records.value(id).contains("no");
-        const uint response = denied ? 2 : code;
-        return respond(this, options, response, response ? QVariantMap{} : QVariantMap{{"uri", uri}}, delay, caller);
+        uint response = denied ? 2 : code;
+        QString resultUri = uri;
+        if (consentWindow) {
+            const bool visible = consentWindow->isVisible();
+            const bool focused = visible && consentWindow->isActiveWindow() &&
+                                 QGuiApplication::focusWindow() == consentWindow->windowHandle();
+            visibleAtRequest << visible;
+            focusedAtRequest << focused;
+            if (!denied && !permissions->records.value(id).contains("yes")) {
+                if (!focused)
+                    response = 2; // AccessDialog fails before a user decision is stored.
+                else if (!response) {
+                    permissions->records[id] = {"yes"};
+                    resultUri = consentFrameUri;
+                }
+            }
+        }
+        return respond(this, options, response, response ? QVariantMap{} : QVariantMap{{"uri", resultUri}}, delay, caller);
     }
 };
 class ScreenCastPortal : public QDBusAbstractAdaptor {
@@ -349,7 +369,11 @@ class TestCaptureFlow : public QObject {
         settings.set("hotkey/capture", "");
     }
     void init() {
+        qputenv("XDG_CURRENT_DESKTOP", "SnapLingTest");
         screenshot.requests.clear();
+        screenshot.focusedAtRequest.clear();
+        screenshot.visibleAtRequest.clear();
+        screenshot.consentWindow = nullptr;
         screenshot.code = 0;
         screenshot.respectPermissions = false;
         registryState = {};
@@ -995,7 +1019,7 @@ class TestCaptureFlow : public QObject {
         QTest::addColumn<QString>("message");
         QTest::newRow("app-denied") << "io.snapling.SnapLing" << "no" << "已记住";
         QTest::newRow("unidentified-host-denied") << "" << "no" << "不用于本次请求";
-        QTest::newRow("app-allowed-service-failure") << "io.snapling.SnapLing" << "yes" << "连接已注册";
+        QTest::newRow("app-allowed-service-failure") << "io.snapling.SnapLing" << "yes" << "journalctl --user";
     }
     void screenshotPermissionDiagnostics() {
         QFETCH(QString, id);
@@ -1012,11 +1036,14 @@ class TestCaptureFlow : public QObject {
         QCOMPARE(screenCast.created, 0);
     }
     void reRequestScreenshotPermissionFromMainWindow() {
+        qunsetenv("XDG_CURRENT_DESKTOP");
         permissionStore.records = {{"io.snapling.SnapLing", {"no"}}, {"", {"no"}}, {"another.app", {"yes"}}};
         screenshot.respectPermissions = true;
         Application app(nullptr, backend(false));
-        app.command({"--capture"});
         auto *main = windows<QMainWindow>().first();
+        screenshot.consentWindow = main;
+        screenshot.consentFrameUri = screenshot.uri;
+        app.command({"--capture"});
         QTRY_VERIFY(main->findChild<QLabel *>("captureStatus")->text().contains("已记住"));
         auto *retry = main->findChild<QPushButton *>("retryScreenshotPermission");
         QVERIFY(retry);
@@ -1028,8 +1055,137 @@ class TestCaptureFlow : public QObject {
         QVERIFY(permissionStore.writtenPermissions.isEmpty());
         QCOMPARE(permissionStore.records.value(""), QStringList{"no"});
         QCOMPARE(permissionStore.records.value("another.app"), QStringList{"yes"});
-        QCOMPARE(screenshot.requests, (QList<bool>{false, false}));
+        QCOMPARE(screenshot.visibleAtRequest, (QList<bool>{false, true, false}));
+        QCOMPARE(screenshot.focusedAtRequest, (QList<bool>{false, true, false}));
+        QCOMPARE(screenshot.requests, (QList<bool>{false, false, false}));
         QCOMPARE(screenCast.created, 0);
+    }
+    void gnomeFirstConsentRequiresFocusAndGrabsFreshPixels_data() {
+        QTest::addColumn<bool>("fromMainButton");
+        QTest::newRow("hotkey-command-from-background") << false;
+        QTest::newRow("main-capture-button") << true;
+    }
+    void gnomeFirstConsentRequiresFocusAndGrabsFreshPixels() {
+        QFETCH(bool, fromMainButton);
+        qputenv("XDG_CURRENT_DESKTOP", "ubuntu:GNOME");
+        permissionStore.records = {{"", {"no"}}, {"another.app", {"yes"}}};
+        screenshot.respectPermissions = true;
+        QImage consentPixels(image.size(), QImage::Format_RGB32);
+        consentPixels.fill(Qt::magenta);
+        const auto consentPath = images.filePath("consent-window.png");
+        QVERIFY(consentPixels.save(consentPath));
+        screenshot.consentFrameUri = QUrl::fromLocalFile(consentPath).toString();
+        auto capture = backend(false);
+        QSignalSpy frames(capture.get(), &ICaptureBackend::captured);
+        Application app(nullptr, std::move(capture));
+        auto *main = windows<QMainWindow>().first();
+        screenshot.consentWindow = main;
+        // Reproduce the reported failure with an already registered but unfocused client.
+        auto unfocused = backend(false);
+        QSignalSpy denied(unfocused.get(), &ICaptureBackend::failed);
+        unfocused->capture(CaptureMode::FullScreen);
+        QTRY_COMPARE(denied.size(), 1);
+        QVERIFY(!permissionStore.records.contains("io.snapling.SnapLing"));
+        QCOMPARE(screenshot.focusedAtRequest, QList<bool>{false});
+        screenshot.requests.clear();
+        screenshot.visibleAtRequest.clear();
+        screenshot.focusedAtRequest.clear();
+        if (fromMainButton) {
+            app.show();
+            main->findChild<QComboBox *>()->setCurrentIndex(int(CaptureMode::FullScreen));
+            auto *button = main->findChild<QPushButton *>("captureButton");
+            QVERIFY(button);
+            QTest::mouseClick(button, Qt::LeftButton);
+        } else {
+            app.command({"--full"});
+        }
+        QTRY_COMPARE_WITH_TIMEOUT(windows<SelectionOverlay>().size(), 1, 5000);
+        auto *overlay = windows<SelectionOverlay>().first();
+        QCOMPARE(screenshot.visibleAtRequest, (QList<bool>{true, false}));
+        QCOMPARE(screenshot.focusedAtRequest, (QList<bool>{true, false}));
+        QCOMPARE(screenshot.requests, (QList<bool>{false, false}));
+        QCOMPARE(permissionStore.records.value("io.snapling.SnapLing"), QStringList{"yes"});
+        QCOMPARE(permissionStore.records.value(""), QStringList{"no"});
+        QCOMPARE(permissionStore.records.value("another.app"), QStringList{"yes"});
+        QCOMPARE(permissionStore.writes, 0);
+        QCOMPARE(screenCast.created, 0);
+        QCOMPARE(frames.size(), 1);
+        QTRY_COMPARE(overlay->phase(), SelectionOverlay::Phase::QuickEditing);
+        QCOMPARE(overlay->session()->document.original().pixelColor(10, 20), QColor(Qt::red));
+        overlay->close();
+        QTRY_VERIFY(windows<SelectionOverlay>().isEmpty());
+        // The next shortcut is one real capture, without showing the consent window.
+        app.command({"--full"});
+        QTRY_COMPARE(windows<SelectionOverlay>().size(), 1);
+        QCOMPARE(frames.size(), 2);
+        QCOMPARE(screenshot.visibleAtRequest, (QList<bool>{true, false, false}));
+    }
+    void gnomeCancelDuringFirstConsentIgnoresLateSuccess() {
+        qputenv("XDG_CURRENT_DESKTOP", "GNOME");
+        screenshot.delay = 250;
+        screenshot.consentFrameUri = screenshot.uri;
+        Application app(nullptr, backend(false));
+        auto *main = windows<QMainWindow>().first();
+        screenshot.consentWindow = main;
+        app.command({"--capture"});
+        QTRY_COMPARE(screenshot.focusedAtRequest, QList<bool>{true});
+        app.command({"--cancel-capture"});
+        QTest::qWait(400);
+        QCOMPARE(screenshot.requests.size(), 1);
+        QVERIFY(windows<SelectionOverlay>().isEmpty());
+        screenshot.delay = 0;
+        app.command({"--capture"});
+        QTRY_COMPARE(windows<SelectionOverlay>().size(), 1);
+        QCOMPARE(screenshot.visibleAtRequest, (QList<bool>{true, false}));
+    }
+    void gnomeForegroundDialogFailureKeepsPermissionUnset() {
+        qputenv("XDG_CURRENT_DESKTOP", "GNOME");
+        screenshot.code = 2;
+        permissionStore.records[""] = {"no"};
+        Application app(nullptr, backend(false));
+        auto *main = windows<QMainWindow>().first();
+        screenshot.consentWindow = main;
+        app.command({"--full"});
+        auto *status = main->findChild<QLabel *>("captureStatus");
+        QTRY_VERIFY(status->text().contains("journalctl --user"));
+        QVERIFY(status->isVisible());
+        QVERIFY(status->text().contains("前台"));
+        QCOMPARE(screenshot.focusedAtRequest, QList<bool>{true});
+        QCOMPARE(permissionStore.writes, 0);
+        QVERIFY(!permissionStore.records.contains("io.snapling.SnapLing"));
+        QVERIFY(windows<SelectionOverlay>().isEmpty());
+    }
+    void gnomePermissionRecoveryRequiresManualReset_data() {
+        QTest::addColumn<QString>("decision");
+        QTest::addColumn<QString>("statusMessage");
+        QTest::newRow("remembered-denial") << QString("no") << QString("已记住");
+        QTest::newRow("always-ask") << QString("ask") << QString("每次截图");
+    }
+    void gnomePermissionRecoveryRequiresManualReset() {
+        QFETCH(QString, decision);
+        QFETCH(QString, statusMessage);
+        qputenv("XDG_CURRENT_DESKTOP", "GNOME");
+        permissionStore.records["io.snapling.SnapLing"] = {decision};
+        screenshot.respectPermissions = true;
+        screenshot.consentFrameUri = screenshot.uri;
+        Application app(nullptr, backend(false));
+        auto *main = windows<QMainWindow>().first();
+        screenshot.consentWindow = main;
+        app.command({"--capture"});
+        QTRY_VERIFY(main->findChild<QLabel *>("captureStatus")->text().contains(statusMessage));
+        QVERIFY(windows<SelectionOverlay>().isEmpty());
+        QCOMPARE(permissionStore.writes, 0);
+        QVERIFY(!screenshot.focusedAtRequest.contains(true));
+        screenshot.visibleAtRequest.clear();
+        screenshot.focusedAtRequest.clear();
+        auto *retry = main->findChild<QPushButton *>("retryScreenshotPermission");
+        QVERIFY(retry && retry->isVisible());
+        QTest::mouseClick(retry, Qt::LeftButton);
+        QTRY_COMPARE(windows<SelectionOverlay>().size(), 1);
+        QCOMPARE(screenshot.focusedAtRequest, (QList<bool>{true, false}));
+        QCOMPARE(permissionStore.writes, 1);
+        QVERIFY(permissionStore.writtenPermissions.isEmpty());
+        QCOMPARE(permissionStore.writtenApp, QString("io.snapling.SnapLing"));
     }
     void permissionResetFailureDoesNotCaptureOrGrant() {
         permissionStore.rejectWrite = true;

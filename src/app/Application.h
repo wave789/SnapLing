@@ -27,14 +27,22 @@ class Application final : public QObject {
 
   private:
     void capture(CaptureMode mode = CaptureMode::Region, bool ocr = false, bool translate = false,
-                 int delay = 0);
+                 int delay = 0, bool explicitConsent = false);
     void beginCapture();
+    void prepareDesktopCapture();
+    void scheduleCapture(int milliseconds);
+    void requestConsentWhenFocused();
+    bool finishConsent();
     void restoreWindows();
     void showCaptureOverlays(CaptureFrame frame);
     void closeCaptureOverlays(SelectionOverlay *except = nullptr);
     QList<QPointer<SelectionOverlay>> captureOverlays;
     QList<QPointer<QWidget>> hiddenWindows;
     bool preparing = false;
+    enum class Consent { None, Checking, WaitingForFocus, Requesting };
+    Consent consent = Consent::None;
+    bool mainShownForConsent = false, mainWasMinimized = false;
+    quint64 captureGeneration = 0;
     void edit(QImage image, bool ocr = false, bool translate = false);
     void edit(std::shared_ptr<EditorSession> session);
     void open(QString path = {});
@@ -56,7 +64,7 @@ class Application final : public QObject {
     QSystemTrayIcon tray;
     CaptureMode pendingMode = CaptureMode::Region;
     bool pendingOcr = false, pendingTranslation = false, capturing = false;
-    int remaining = 0;
+    int remaining = 0, pendingDelay = 0, pendingScreen = -1;
     QElapsedTimer captureTimer;
 };
 } // namespace SnapLing
