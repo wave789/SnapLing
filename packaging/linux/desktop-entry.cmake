@@ -1,0 +1,40 @@
+# Shared by the normal installer and the source-tree launcher.
+cmake_minimum_required(VERSION 3.22)
+foreach(snapling_required IN ITEMS EXECUTABLE DESTINATION STAGE)
+    if(NOT DEFINED SNAPLING_DESKTOP_${snapling_required} OR "${SNAPLING_DESKTOP_${snapling_required}}" STREQUAL "")
+        message(FATAL_ERROR "SNAPLING_DESKTOP_${snapling_required} is required")
+    endif()
+    if(NOT IS_ABSOLUTE "${SNAPLING_DESKTOP_${snapling_required}}")
+        message(FATAL_ERROR "SNAPLING_DESKTOP_${snapling_required} must be an absolute path")
+    endif()
+endforeach()
+
+# Quote for the Exec argv parser, then encode backslashes for the desktop-entry string parser.
+# The absolute command must be discoverable even if the Portal daemon has a different PATH.
+set(snapling_executable "${SNAPLING_DESKTOP_EXECUTABLE}")
+string(REPLACE "\\" "\\\\" snapling_executable "${snapling_executable}")
+string(REPLACE "\"" "\\\"" snapling_executable "${snapling_executable}")
+string(REPLACE "`" "\\`" snapling_executable "${snapling_executable}")
+string(REPLACE "$" "\\$" snapling_executable "${snapling_executable}")
+string(REPLACE "\\" "\\\\" snapling_executable "${snapling_executable}")
+string(REPLACE "%" "%%" snapling_executable "${snapling_executable}")
+file(READ "${CMAKE_CURRENT_LIST_DIR}/io.snapling.SnapLing.desktop" snapling_desktop)
+string(REPLACE "Exec=snapling" "Exec=\"${snapling_executable}\"" snapling_desktop "${snapling_desktop}")
+if(DEFINED SNAPLING_DESKTOP_ICON AND NOT SNAPLING_DESKTOP_ICON STREQUAL "")
+    string(REPLACE "\\" "\\\\" snapling_icon "${SNAPLING_DESKTOP_ICON}")
+    string(REPLACE "Icon=snapling" "Icon=${snapling_icon}" snapling_desktop "${snapling_desktop}")
+endif()
+file(MAKE_DIRECTORY "${SNAPLING_DESKTOP_STAGE}")
+set(snapling_desktop_stage "${SNAPLING_DESKTOP_STAGE}/io.snapling.SnapLing.desktop")
+file(WRITE "${snapling_desktop_stage}" "${snapling_desktop}")
+if(SNAPLING_DESKTOP_SOURCE_RUN)
+    # Compare content: an obsolete user entry may have the same timestamp as the generated one.
+    file(MAKE_DIRECTORY "${SNAPLING_DESKTOP_DESTINATION}")
+    set(snapling_user_desktop "${SNAPLING_DESKTOP_DESTINATION}/io.snapling.SnapLing.desktop")
+    configure_file("${snapling_desktop_stage}" "${snapling_user_desktop}" COPYONLY)
+    file(CHMOD "${snapling_user_desktop}" PERMISSIONS OWNER_READ OWNER_WRITE GROUP_READ WORLD_READ)
+else()
+    # file(INSTALL) preserves normal install permissions, DESTDIR and the install manifest.
+    file(INSTALL DESTINATION "${SNAPLING_DESKTOP_DESTINATION}" TYPE FILE
+         FILES "${snapling_desktop_stage}" PERMISSIONS OWNER_READ OWNER_WRITE GROUP_READ WORLD_READ)
+endif()

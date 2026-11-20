@@ -1,0 +1,63 @@
+SnapLing source-run desktop identity validation — 2026-11-20
+Environment: Debian 13 x86_64, GCC 14.2, Qt 6.8.2, CMake 3.31.6
+
+Problem reproduced:
+  desktop_entry_installed=0
+  Registry.Register(io.snapling.SnapLing): App info not found
+
+Build:
+  source tools/dev-env.sh
+  cmake --build build --parallel 3
+  PASS (incremental Release build, no C++ changes)
+
+Production source runner, isolated temporary XDG directories:
+  source_runner_control_commands_no_desktop_write=PASS
+  startup_ms=18 desktop_entry_installed=1
+  source_runner_empty_xdg_and_real_gio_launch=PASS
+  source_runner_destdir_ignored_and_other_entry_unchanged=PASS
+  source_entry_stale_path_repair_and_repeat=PASS
+  source_runner_setup_failure_stops_before_qt=PASS
+  source_entry_special_path_real_gio_launch=PASS
+  normal_install_prefix_manifest_real_gio_launch=PASS
+  normal_install_destdir_runtime_path=PASS
+
+The startup smoke test used offscreen Qt and no X server, so its X11 hotkey
+registration was unavailable as expected. It did not test desktop capture.
+Gio launches used --version, including source paths containing spaces, dollar,
+backtick and double quote characters. No shell command interpolation was used.
+File mode was 0644. Normal install manifest listed the desktop entry once.
+DESTDIR install kept /usr/bin/snapling in Exec, excluding the staging directory.
+Source-run installation ignored DESTDIR and touched only SnapLing's own entry.
+
+Real Portal frontend, private bus and XDG directories:
+  /usr/bin/python3 tools/test-portal-identity.py --portal <xdg-desktop-portal 1.20.3>
+  real_portal_anonymous_host_denied=PASS code=2
+  real_portal_missing_desktop_rejected=PASS
+  real_portal_source_entry_prepared=PASS
+  portal_identity=registered app_id=io.snapling.SnapLing connection=dedicated
+  portal_screenshot_response code=0 has_uri=1
+  portal_actual_image=240x320
+  TestPortal: 3 passed, 0 failed, 0 skipped
+  real_portal_registered_app_scoped_dialog_and_capture=PASS
+  real_portal_host_denial_unchanged=PASS
+
+The same frontend remained running between the missing-entry rejection and
+the successful registration. Production tools/install-desktop.sh generated
+the app entry; no prewritten test desktop fixture was used.
+Access responses, PermissionStore and Screenshot backend image were test doubles.
+The real frontend handled app discovery, registration, permission routing and
+Screenshot forwarding. No host desktop bus or user screen was accessed.
+
+CTest:
+  ctest --test-dir build -R '^(capture_flow|portal_hotkey)$' --output-on-failure
+  capture_flow: PASS, 51 passed, 0 failed, 1 conditional Wayland skip
+  portal_hotkey: PASS, 7 passed, 0 failed, 0 skipped
+  2/2 groups passed
+
+Additional checks: bash -n for source launcher and helper; git diff --check;
+desktop-file-validate for generated source and installed desktop files — PASS.
+
+Local full logs: build/source-desktop-runner.log,
+build/source-desktop-real-portal.log, build/source-desktop-capture-ctest.log.
+Not validated: user's Ubuntu 26.04.1 GNOME permission UI and physical three-screen
+desktop. No claim that the private backend test replaces this real-device check.

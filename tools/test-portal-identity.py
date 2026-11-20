@@ -124,6 +124,27 @@ def worker(args):
         assert not dialogs and not captures
         print("real_portal_anonymous_host_denied=PASS code=2", flush=True)
 
+        identity_client = Gio.DBusConnection.new_for_address_sync(
+            os.environ["DBUS_SESSION_BUS_ADDRESS"],
+            Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION, None, None)
+        try:
+            identity_client.call_sync(
+                "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop",
+                "org.freedesktop.host.portal.Registry", "Register",
+                GLib.Variant("(sa{sv})", ("io.snapling.SnapLing", {})),
+                None, Gio.DBusCallFlags.NONE, 3000, None)
+        except GLib.Error as error:
+            assert "App info not found" in str(error), error
+        else:
+            raise AssertionError("registration must fail before preparing the desktop entry")
+        finally:
+            identity_client.close_sync(None)
+        print("real_portal_missing_desktop_rejected=PASS", flush=True)
+        source_root = Path(__file__).resolve().parent.parent
+        subprocess.run([str(source_root / "tools/install-desktop.sh")], check=True, timeout=15)
+        assert Gio.DesktopAppInfo.new("io.snapling.SnapLing.desktop") is not None
+        print("real_portal_source_entry_prepared=PASS", flush=True)
+
         output_file = (root / "client.log").open("w+")
         process = subprocess.Popen([args.test_binary, "screenshotWithUserPermission"], stdout=output_file, stderr=subprocess.STDOUT)
         try:
@@ -177,12 +198,6 @@ def main():
             "Interfaces=org.freedesktop.impl.portal.Screenshot;org.freedesktop.impl.portal.Access;\nUseIn=SnapLingTest;\n")
         (root / "config/xdg-desktop-portal/portals.conf").write_text("[preferred]\ndefault=snaplingtest\n")
         (root / "portals/portals.conf").write_text("[preferred]\ndefault=snaplingtest\n")
-        executable = args.test_binary
-        for character in ('\\', '"', '$', '`'):
-            executable = executable.replace(character, '\\' + character)
-        executable = executable.replace('\\', '\\\\').replace('%', '%%')
-        (root / "data/applications/io.snapling.SnapLing.desktop").write_text(
-            '[Desktop Entry]\nType=Application\nName=SnapLing\nExec="' + executable + '"\n')
         fixture_png(root / "fixture.png")
         env = os.environ.copy()
         env.update({"SNAPLING_IDENTITY_TEST_PRIVATE_BUS": "1", "SNAPLING_IDENTITY_TEST_ROOT": str(root),

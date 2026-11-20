@@ -25,9 +25,11 @@ HTTP 测试服务器仅作为 **测试替身**，生产代码通过 QNetworkAcce
 /usr/bin/python3 tools/test-portal-identity.py --portal /usr/libexec/xdg-desktop-portal
 ```
 
-工具会启动私有 D-Bus、独立 XDG 目录和真实 Portal 前端。权限库、Access 授权应答和 Screenshot 图像均来自测试替身；先验证空身份被记住的拒绝，再运行生产 WaylandCapture，断言授权请求与截图后端收到的 app ID 均为 io.snapling.SnapLing，返回图像且共用拒绝记录未改变。它不会连接用户的桌面总线或截取用户屏幕，也不代表 GNOME 后端/物理三屏已通过。Portal 可执行文件路径按发行版调整。
+工具会启动私有 D-Bus、独立 XDG 目录和真实 Portal 前端。权限库、Access 授权应答和 Screenshot 图像均来自测试替身；先验证空身份被记住的拒绝，以及缺失桌面入口时 Register 返回 App info not found。随后在该 Portal 仍运行时执行生产 `tools/install-desktop.sh`，验证 Gio 可识别入口，再运行生产 WaylandCapture，断言授权请求与截图后端收到的 app ID 均为 io.snapling.SnapLing，返回图像且共用拒绝记录未改变。它不会连接用户的桌面总线或截取用户屏幕，也不代表 GNOME 后端/物理三屏已通过。Portal 可执行文件路径按发行版调整。
 
 用户目录安装验证包含带空格的临时前缀：使用真实 Gio.DesktopAppInfo 读取生成的 desktop 文件，并通过该入口以 `--version` 启动已安装程序，检查绝对 Exec 路径、引号和安装 manifest。不要只用文件是否存在代替桌面入口有效性检查。
+
+源码启动验证使用临时 XDG 目录：从没有入口的状态运行 `tools/run.sh --background --exit-after 200`，检查 `desktop_entry_installed=1`；通过真实 Gio 启动生成入口的 `--version`，检查失效入口修复、重复准备、带空格的源码路径，以及准备失败时不会继续启动 Qt。另检查 `--quit`/`--help`/`--version` 不写入口，其他应用入口不变，源码入口忽略打包 `DESTDIR`，正式安装仍保留正确的运行时 Exec 和 manifest。
 
 多屏用例提供内置屏、HDMI、DP 三路不同颜色和原生尺寸的帧，故意打乱 Portal 节点顺序。验证 100%/150%/200% 混合缩放、负原点、同分辨率屏幕映射、指定外接屏只读取对应节点、等待较慢外接屏、授权不足后通过主界面重新选择、三处覆盖层中选定外接屏并继续标注/高级编辑、Esc 关闭所有遮罩后重试、全屏拼接包含各屏像素、旧单屏 token 迁移、持续共享切换目标、布局变化及会话关闭。核心套件验证拼接坐标、透明空隙、原生像素与尺寸上限。这些是合成帧和私有 D-Bus 的回归测试，不能替代真实笔记本与两台外接显示器的验证。
 

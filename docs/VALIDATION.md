@@ -217,3 +217,18 @@ Linux 安装生成绝对 Exec 路径，避免 `~/.local/bin` 未出现在 Portal
 - **真实 xdg-desktop-portal 1.20.3 前端验证通过**：在私有 D-Bus 和 XDG 目录启动前端，测试权限库含空身份 no、SnapLing 未设置。匿名请求返回 2 且无授权请求；生产 WaylandCapture 注册后，前端向测试 Access 后端传递 io.snapling.SnapLing，并在模拟用户允许后，以同一 app ID 调用测试 Screenshot 后端、返回 240×320 PNG。共用 no 和其他应用权限保持不变。
 
 真实前端测试复现命令为 `/usr/bin/python3 tools/test-portal-identity.py --portal <xdg-desktop-portal路径>`。授权应答、权限库和图像来自明确的测试替身，未测试真实 GNOME 授权弹窗或用户物理三屏，也未修改用户桌面的权限。日志摘要见 [Portal 身份验证记录](validation/2026-11-20-portal-identity.txt)，本地完整回归日志为 `build/portal-identity-final-ctest.log`。
+
+### 后续：源码启动自动准备桌面入口
+
+用户的新日志为 `desktop_entry_installed=0` 和 `App info not found for 'io.snapling.SnapLing'`。这次失败发生在 Registry 注册阶段，尚未请求截图。检查发现 `tools/run.sh` 直接启动二进制，没有执行桌面入口准备；先前的正式安装逻辑不会在源码运行时自动执行。
+
+启动脚本现于 Qt 初始化前同步准备当前用户的 `io.snapling.SnapLing.desktop`，遵循 XDG_DATA_HOME，Exec 指向当前源码启动脚本的绝对路径，图标指向源码 SVG。复用正式安装的 desktop 格式化逻辑，单独的 `tools/install-desktop.sh` 无需 sudo，也不复制程序或模型。源码入口使用内容比较更新，避免旧入口与新文件时间戳相同而漏修复；准备失败在终端报告并停止启动。退出、帮助和版本命令不写入口。没有改动权限库或重启桌面服务。
+
+本轮验证环境为 Debian 13、Qt 6.8.2，结果如下：
+
+- Release 增量构建通过；截图流程及 Portal 快捷键两组 CTest 全部通过。截图流程包含 51 通过、1 个真实 Wayland 条件用例跳过，快捷键 7 通过。
+- 真实 xdg-desktop-portal 1.20.3 私有前端在缺失入口时复现相同 App info not found；不重启前端，运行生产入口准备脚本后，Gio 可识别应用，生产 WaylandCapture 注册成功并接收 240×320 测试 PNG。共用拒绝与其他应用权限保持不变。
+- 在空的临时 XDG 目录运行生产 `run.sh`，启动日志为 `desktop_entry_installed=1`。真实 Gio 经源码入口启动 `--version` 成功；已有失效入口修复、重复准备、源码路径含空格/引号等字符、准备失败中止、控制命令不写入口、其他应用入口保留均通过。
+- 正式安装的带空格前缀、实际 Gio 启动、0644 模式及 manifest 通过；DESTDIR 安装保留 `/usr/bin/snapling`，不把暂存目录写进 Exec。
+
+日志摘要见 [源码入口验证记录](validation/2026-11-20-source-desktop.txt)。未验证用户 Ubuntu 26.04.1 的真实 GNOME 授权弹窗与三台物理显示器，私有前端的授权与截图仍由测试后端提供。本轮没有修改 C++ 截图代码，用户日志对应的已编译版本可在拉取启动脚本更新后直接运行。

@@ -31,7 +31,7 @@ sudo apt install build-essential cmake ninja-build pkg-config libxkbcommon-dev q
 
 没有 sudo 的开发机可执行 `python3 tools/bootstrap-local.py`，将经 apt SHA256 校验的依赖提取至 `.deps`。这仅是开发工具，主程序不依赖 Python。详细配置与 Windows 构建见 [BUILD.md](BUILD.md)。
 
-当前开发环境的可运行入口：`build/snapling`；项目内依赖环境使用 `tools/run.sh`。便携包入口为 `dist/SnapLing/snapling`，不需要 `.deps`。
+源码运行使用 `tools/run.sh`：加载项目内开发依赖，并在启动程序前准备当前用户的桌面入口，供 Wayland Portal 识别 SnapLing。便携包入口为 `dist/SnapLing/snapling`，不需要 `.deps`。
 
 ```bash
 snapling --capture        # 矩形选区
@@ -73,15 +73,17 @@ Wayland 默认请求非交互式 Screenshot，后台解码完整桌面，按 Qt 
 
 若终端显示 `portal_screenshot_response code=2 has_uri=0`，表示系统没有交付图片，还没有进入多屏选区阶段。响应码 2 也可能来自截图服务错误，不能单凭此码断言权限被拒绝。新版会读取权限库并打印 `screenshot_permission app=... unidentified_host=...`；主界面的「重新请求截图授权」只清空 `io.snapling.SnapLing` 自己的截图授权决定，然后由系统重新询问，不直接写入允许，也不修改其他应用或未识别主机应用的记录。
 
-从源码运行时，建议先进行一次用户目录安装，确保 Portal 能找到 SnapLing 的 desktop 身份文件，无需 sudo：
+从源码运行时，`tools/run.sh` 会在启动 Qt 前自动准备 `io.snapling.SnapLing.desktop`，无需 sudo 或先安装整个项目：
 
 ```bash
-cmake --install build --prefix "$HOME/.local"
+./tools/run.sh
 ```
+
+入口写入 `${XDG_DATA_HOME:-$HOME/.local/share}/applications`，指向当前源码目录中 `tools/run.sh` 的绝对路径，应用菜单启动也会加载开发依赖。已有失效入口会更新；准备失败时会显示具体路径并停止启动。`--quit`、`--help` 和 `--version` 不写入口。也可单独运行 `./tools/install-desktop.sh` 准备入口。
 
 `desktop_entry_installed=1` 只说明身份文件存在，不代表截图连接已经注册成功。新版为单次截图建立独立 D-Bus 连接，先等待 `Register(io.snapling.SnapLing)` 成功，再在同一连接请求 Screenshot；正常会打印 `portal_identity=registered app_id=io.snapling.SnapLing connection=dedicated`。这样不会沿用 Qt 共享连接被缓存的“未识别应用”身份，也不需要修改那条共用拒绝记录。
 
-Linux 安装时 desktop 文件的 Exec 会写为安装目录中程序的绝对路径，避免用户目录安装后，Portal 的 PATH 中还没有 `~/.local/bin`，导致文件虽存在却不能被 GDesktopAppInfo 识别。升级后请重新执行上面的安装命令，更新身份文件和程序。
+正式安装仍可执行 `cmake --install build --prefix "$HOME/.local"`。Linux 安装时 desktop 文件的 Exec 写为安装目录中程序的绝对路径，避免 Portal 的 PATH 中还没有 `~/.local/bin` 而无法识别。源码启动入口指向当前源码目录；移动源码后重新执行新位置的 `tools/run.sh`，或重新正式安装以更新入口。
 
 退出旧进程后重新运行，按截图快捷键或点击「开始截图」，在系统询问时允许 SnapLing 截图。只有 SnapLing 自己保存了拒绝记录时，才需点击「重新请求截图授权」。不支持 Registry 的旧 Portal 明确打印 `portal_identity=legacy_unverified`，仍使用系统推断的身份；此时可从已安装的应用启动器运行。注册失败会显示原因并停止本次截图，不悄悄切回未识别身份或开启共享。仍有错误时请保留 `portal_identity`、权限状态及服务日志；程序不会自动清空共用权限或重启桌面服务。
 

@@ -12,7 +12,7 @@ sudo apt install build-essential cmake ninja-build file pkg-config libxkbcommon-
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel 4
 ctest --test-dir build --output-on-failure
-./build/snapling
+./tools/run.sh
 ```
 
 模型已包含在 `models/tessdata`。开发环境可设置 `TESSDATA_PREFIX`，或在设置中手动选模型目录。Windows 多配置构建的测试已由 CTest 指定源码模型路径。
@@ -28,6 +28,8 @@ cmake --build build --parallel 4
 ```
 
 `.deps` 仅为当前发行版的开发前缀，软件包按 apt 元数据 SHA256 校验，不修改系统。Python 仅运行开发脚本。该模式可能引用主机已安装的同版本运行库；交付使用安装目录或便携包。
+
+源码启动请使用 `tools/run.sh`。它在 Qt 初始化前自动写入当前用户的 `io.snapling.SnapLing.desktop`，供 Wayland Portal 查找应用身份；不需要先安装完整项目或使用 sudo。入口指向当前源码启动脚本的绝对路径，保留本地开发依赖环境。默认写入 `~/.local/share/applications`，遵循 `XDG_DATA_HOME`；准备失败会停止启动并报告路径。只需准备入口时可运行 `tools/install-desktop.sh`。直接执行 `build/snapling` 不执行这一步。
 
 Wayland 默认使用非交互式 Screenshot Portal，支持单次完整桌面和多屏即时框选，不依赖 PipeWire。默认构建 `-DSNAPLING_PIPEWIRE=ON` 额外提供 ScreenCast 兼容截图，需要 `libpipewire-0.3-dev`；关闭此选项不影响默认单次截图。`-DSNAPLING_TESSERACT=OFF` 编译不含 OCR 的诊断构建，不能当成完整版本交付。ZXing 缺失时二维码入口明确报告不可用。Linux 即使 Wayland 运行也需要 X11 开发库以构建 X11 兼容后端。
 
