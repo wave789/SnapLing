@@ -2,7 +2,7 @@
 
 ## Ubuntu 24.04 / 26.04
 
-最低 Qt 6.4，CMake 3.22，C++20。不需要 Electron、Node 或 Python 运行应用。Ubuntu 24.04 使用发行版 Qt 6.4.2；本次 Ubuntu 26.04 开发机使用 Qt 6.10.2。不要混用这两个版本的 Qt 插件。
+最低 Qt 6.4，CMake 3.22，C++20。主程序和默认 Tesseract 不依赖 Python，可选 RapidOCR 使用独立的 Python 虚拟环境。Ubuntu 24.04 使用发行版 Qt 6.4.2，Ubuntu 26.04 使用 Qt 6.10.2。Qt 插件须匹配运行库版本。
 
 ```bash
 sudo apt update
@@ -27,11 +27,11 @@ cmake --build build --parallel 4
 ./tools/run.sh
 ```
 
-`.deps` 仅为当前发行版的开发前缀，软件包按 apt 元数据 SHA256 校验，不修改系统。Python 仅运行开发脚本。该模式可能引用主机已安装的同版本运行库；交付使用安装目录或便携包。
+`.deps` 仅为当前发行版的开发前缀，软件包按 apt 元数据 SHA256 校验。该模式可能引用主机已安装的同版本运行库，交付使用安装目录或便携包。
 
 源码启动请使用 `tools/run.sh`。它在 Qt 初始化前自动写入当前用户的 `io.snapling.SnapLing.desktop`，供 Wayland Portal 查找应用身份；不需要先安装完整项目或使用 sudo。入口指向当前源码启动脚本的绝对路径，保留本地开发依赖环境。默认写入 `~/.local/share/applications`，遵循 `XDG_DATA_HOME`；准备失败会停止启动并报告路径。只需准备入口时可运行 `tools/install-desktop.sh`。直接执行 `build/snapling` 不执行这一步。
 
-Wayland 默认使用非交互式 Screenshot Portal，支持单次完整桌面和多屏即时框选，不依赖 PipeWire。默认构建 `-DSNAPLING_PIPEWIRE=ON` 额外提供 ScreenCast 兼容截图，需要 `libpipewire-0.3-dev`；关闭此选项不影响默认单次截图。`-DSNAPLING_TESSERACT=OFF` 编译不含 OCR 的诊断构建，不能当成完整版本交付。ZXing 缺失时二维码入口明确报告不可用。Linux 即使 Wayland 运行也需要 X11 开发库以构建 X11 兼容后端。
+Wayland 默认使用非交互式 Screenshot Portal，支持单次完整桌面和多屏即时框选，不依赖 PipeWire。默认构建 `-DSNAPLING_PIPEWIRE=ON` 额外提供 ScreenCast 兼容截图，需要 `libpipewire-0.3-dev`；关闭此选项不影响默认单次截图。`-DSNAPLING_TESSERACT=OFF` 编译不含 Tesseract 的诊断构建，常规交付请开启此选项。ZXing 缺失时二维码入口明确报告不可用。Linux 即使 Wayland 运行也需要 X11 开发库以构建 X11 兼容后端。
 
 ## Linux 安装
 

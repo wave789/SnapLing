@@ -1,6 +1,7 @@
 #include "core/Types.h"
 #include "capture/CaptureService.h"
 #include "editor/Document.h"
+#include "editor/EditorSession.h"
 #include "history/HistoryStore.h"
 #include "image/ImageProcessor.h"
 #include "ocr/OcrEngine.h"
@@ -9,12 +10,18 @@
 #include "settings/Settings.h"
 #include "translation/TranslationProvider.h"
 #include "ui/EditorWindow.h"
+#include "ui/SettingsDialog.h"
 #include <QAction>
+#include <QComboBox>
+#include <QDialogButtonBox>
+#include <QDir>
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QMessageBox>
 #include <QPainter>
+#include <QPushButton>
+#include <QScopeGuard>
 #include <QSignalSpy>
 #include <QTcpServer>
 #include <QTcpSocket>
@@ -521,8 +528,9 @@ class TestCore : public QObject {
     void editorInPlaceTranslation() {
 #ifdef SNAPLING_HAVE_TESSERACT
         QTemporaryDir tmp;
+        QVERIFY(tmp.isValid());
         Settings settings(tmp.filePath("settings.ini"));
-        settings.set("ocr/path", findTessdata());
+        settings.set("ocr/path", tmp.filePath("old-checkout/models/tessdata"));
         settings.set("ocr/languages", "eng");
         ProviderConfig config;
         QTcpServer server;
@@ -575,6 +583,32 @@ class TestCore : public QObject {
         QSKIP("此构建未包含 OCR 引擎");
 #endif
     }
+    void ocrModelLookupRequiresAllRequestedLanguages() {
+        QTemporaryDir temp;
+        QVERIFY(temp.isValid());
+        QFile english(temp.filePath("eng.traineddata"));
+        QVERIFY(english.open(QIODevice::WriteOnly));
+        QCOMPARE(english.write("fixture"), 7);
+        english.close();
+        const auto previousPrefix = qgetenv("TESSDATA_PREFIX");
+        const auto restorePrefix = qScopeGuard([previousPrefix] {
+            if (previousPrefix.isNull())
+                qunsetenv("TESSDATA_PREFIX");
+            else
+                qputenv("TESSDATA_PREFIX", previousPrefix);
+        });
+        qunsetenv("TESSDATA_PREFIX");
+        const auto defaultMixedModels = findTessdata("chi_sim+eng");
+        qputenv("TESSDATA_PREFIX", QFile::encodeName(temp.path()));
+        const auto userEnglishModel = availableTessdata(userTessdataDirectory(), "eng");
+        QCOMPARE(findTessdata("eng"), userEnglishModel.isEmpty() ? QDir::cleanPath(temp.path()) : userEnglishModel);
+        QCOMPARE(findTessdata("chi_sim+eng"), defaultMixedModels);
+        const auto homeRelative = QDir(QDir::homePath()).relativeFilePath(temp.path());
+        if (QDir::isRelativePath(homeRelative))
+            QCOMPARE(availableTessdata("~/" + homeRelative, "eng"), QDir::cleanPath(temp.path()));
+        QVERIFY(availableTessdata(temp.path(), "chi_sim+eng").isEmpty());
+        QVERIFY(availableTessdata(temp.filePath("missing"), "eng").isEmpty());
+    }
     void realOfflineOcr() {
 #ifdef SNAPLING_HAVE_TESSERACT
         if (findTessdata().isEmpty())
@@ -591,7 +625,7 @@ class TestCore : public QObject {
         painter.end();
         TesseractOcr engine;
         QSignalSpy done(&engine, &IOcrEngine::completed), failed(&engine, &IOcrEngine::failed);
-        engine.recognize(image, findTessdata(), "chi_sim+eng", true);
+        engine.recognize(image, {}, "chi_sim+eng", true);
         QTRY_VERIFY_WITH_TIMEOUT(!done.isEmpty() || !failed.isEmpty(), 50000);
         QVERIFY2(failed.isEmpty(), failed.isEmpty() ? "" : qPrintable(failed[0][0].toString()));
         auto lines = qvariant_cast<QVector<OcrLine>>(done[0][0]);
@@ -610,6 +644,55 @@ class TestCore : public QObject {
         qInfo("ocr_test_warm_ms=%lld", done[1][1].toLongLong());
 #else
         QSKIP("本构建禁用 OCR");
+#endif
+    }
+    void realRapidOcrEngineSwitch() {
+#if !defined(Q_OS_WIN) && defined(SNAPLING_HAVE_TESSERACT)
+        if (!qEnvironmentVariableIsSet("SNAPLING_TEST_RAPIDOCR"))
+            QSKIP("真实 RapidOCR 验收需先运行 setup-rapidocr.py，然后设置 SNAPLING_TEST_RAPIDOCR=1");
+        QTemporaryDir tmp;
+        QVERIFY(tmp.isValid());
+        Settings settings(tmp.filePath("settings.ini"));
+        ProviderConfig config;
+        QImage image(1000, 240, QImage::Format_RGB32);
+        image.fill(Qt::white);
+        QPainter painter(&image);
+        QFont font("Noto Sans CJK SC");
+        font.setPixelSize(48);
+        painter.setFont(font);
+        painter.setPen(Qt::black);
+        painter.drawText(30, 80, "Hello SnapLing 123");
+        painter.drawText(30, 170, "中文识别测试 你好世界");
+        painter.end();
+        EditorSession session(image, settings, config);
+        for (const auto &engine : QStringList{"tesseract", "rapidocr", "tesseract"}) {
+            SettingsDialog dialog(settings, config);
+            auto *selector = dialog.findChild<QComboBox *>("ocrEngine");
+            auto *buttons = dialog.findChild<QDialogButtonBox *>();
+            QVERIFY(selector);
+            QVERIFY(buttons);
+            QVERIFY(selector->findData(engine) >= 0);
+            selector->setCurrentIndex(selector->findData(engine));
+            buttons->button(QDialogButtonBox::Save)->click();
+            QCOMPARE(dialog.result(), int(QDialog::Accepted));
+            QCOMPARE(Settings(tmp.filePath("settings.ini")).value("ocr/engine").toString(), engine);
+            session.document.change([](DocumentState &state) { state.ocr.clear(); });
+            QTest::ignoreMessage(QtInfoMsg, QRegularExpression(QString("ocr_ms=\\d+ cold=\\d lines=\\d+ engine=%1").arg(engine)));
+            session.runOcr();
+            QTRY_COMPARE_WITH_TIMEOUT(session.task(), EditorSession::Task::Idle, 50000);
+            const auto &lines = session.document.state().ocr;
+            QVERIFY2(!lines.isEmpty(), qPrintable(session.message()));
+            TextLayout layout;
+            layout.setLines(lines);
+            QVERIFY2(layout.all().contains("Hello"), qPrintable(layout.all()));
+            QVERIFY2(layout.all().contains("中文"), qPrintable(layout.all()));
+            for (const auto &line : lines) {
+                QVERIFY(QRectF(image.rect()).contains(line.box));
+                QVERIFY(line.polygon.size() >= 4);
+            }
+        }
+#else
+        QSKIP("本构建不支持切换到 RapidOCR");
 #endif
     }
 };

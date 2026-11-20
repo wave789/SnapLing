@@ -32,6 +32,7 @@ class Application final : public QObject {
     void prepareDesktopCapture();
     void scheduleCapture(int milliseconds);
     void requestConsentWhenFocused();
+    void activateMainWindow();
     bool finishConsent();
     void restoreWindows();
     void showCaptureOverlays(CaptureFrame frame);
@@ -59,7 +60,7 @@ class Application final : public QObject {
     QMainWindow main;
     QComboBox *modeBox, *screenBox;
     QLabel *status, *hotkeyStatus;
-    QString captureActivationToken;
+    QString captureActivationToken, mainActivationToken;
     QPointer<QProgressDialog> countdown;
     QSystemTrayIcon tray;
     CaptureMode pendingMode = CaptureMode::Region;

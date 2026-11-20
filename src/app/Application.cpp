@@ -147,10 +147,10 @@ Application::Application(QObject *p, std::unique_ptr<ICaptureBackend> captureBac
     hotkeyStatus->setObjectName("hotkeyStatus");
     layout->addWidget(hotkeyStatus);
     auto *hotkeyButtons = new QHBoxLayout;
-    auto *retryHotkey = new QPushButton("重新注册快捷键");
+    auto *retryHotkey = new QPushButton("重新注册快捷键", body);
     hotkeyButtons->addWidget(retryHotkey);
     connect(retryHotkey, &QPushButton::clicked, this, &Application::bindHotkeys);
-    auto *copyCommand = new QPushButton("复制系统快捷键命令");
+    auto *copyCommand = new QPushButton("复制系统快捷键命令", body);
     hotkeyButtons->addWidget(copyCommand);
     const bool waylandSession = QGuiApplication::platformName().contains("wayland") ||
                                 qEnvironmentVariable("XDG_SESSION_TYPE") == "wayland";
@@ -201,7 +201,7 @@ Application::Application(QObject *p, std::unique_ptr<ICaptureBackend> captureBac
             // The user explicitly requested consent in this window, even on an unidentified desktop.
             capture(CaptureMode(modeBox->currentIndex()), false, false, 0, true);
         });
-        auto *reselect = new QPushButton("重置兼容截图授权");
+        auto *reselect = new QPushButton("重置兼容截图授权", body);
         reselect->setObjectName("resetCompatibilityCapture");
         reselect->setVisible(settings.value("capture/waylandMethod", "screenshot").toString() == "screencast");
         layout->addWidget(reselect);
@@ -313,25 +313,44 @@ void Application::bindHotkeys() {
     }
 }
 void Application::show() {
-    // 命令启动和截图失败后也需要激活主窗口；此前 token 只用于截图遮罩。
-    const auto token = captureActivationToken;
+    const bool wayland = QGuiApplication::platformName().startsWith("wayland");
+    if (wayland) {
+        // Qt can request a startup token both on show() and activateWindow(). An unconsumed
+        // token leaves GNOME's busy cursor active until its startup notification times out.
+        main.setAttribute(Qt::WA_ShowWithoutActivating);
+        mainActivationToken = captureActivationToken;
+    }
     captureActivationToken.clear();
-    const auto previous = qgetenv("XDG_ACTIVATION_TOKEN");
-    if (!token.isEmpty())
-        qputenv("XDG_ACTIVATION_TOKEN", token.toUtf8());
     if (main.isMinimized())
         main.setWindowState(main.windowState() & ~Qt::WindowMinimized);
     main.show();
-    main.raise();
-    main.activateWindow();
-    if (!token.isEmpty()) {
-        if (previous.isNull())
-            qunsetenv("XDG_ACTIVATION_TOKEN");
-        else
-            qputenv("XDG_ACTIVATION_TOKEN", previous);
+    if (wayland) {
+        if (auto *window = main.windowHandle())
+            window->installEventFilter(this);
+        activateMainWindow();
+    } else {
+        main.raise();
+        main.activateWindow();
     }
 }
+void Application::activateMainWindow() {
+    auto *window = main.windowHandle();
+    if (mainActivationToken.isEmpty() || !main.isVisible() || !window || !window->isExposed())
+        return;
+    const auto previous = qgetenv("XDG_ACTIVATION_TOKEN");
+    qputenv("XDG_ACTIVATION_TOKEN", mainActivationToken.toUtf8());
+    mainActivationToken.clear();
+    window->requestActivate();
+    if (previous.isNull())
+        qunsetenv("XDG_ACTIVATION_TOKEN");
+    else
+        qputenv("XDG_ACTIVATION_TOKEN", previous);
+}
 bool Application::eventFilter(QObject *o, QEvent *e) {
+    if (o == main.windowHandle() && e->type() == QEvent::Expose && !mainActivationToken.isEmpty())
+        activateMainWindow();
+    if (o == &main && e->type() == QEvent::Hide)
+        mainActivationToken.clear();
     if (consent == Consent::WaitingForFocus &&
         ((o == &main && e->type() == QEvent::WindowActivate) ||
          (o == main.windowHandle() && e->type() == QEvent::Expose)))

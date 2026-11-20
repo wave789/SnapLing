@@ -39,7 +39,6 @@ launcher.write_text('''#!/bin/sh
 SNAPLING_BUNDLE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 export LD_LIBRARY_PATH="$SNAPLING_BUNDLE/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export QT_PLUGIN_PATH="$SNAPLING_BUNDLE/plugins"
-export TESSDATA_PREFIX="$SNAPLING_BUNDLE/share/snapling/tessdata"
 exec "$SNAPLING_BUNDLE/bin/snapling" "$@"
 ''')
 launcher.chmod(0o755)

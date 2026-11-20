@@ -1,6 +1,9 @@
 #pragma once
 #include "Document.h"
 #include "ocr/OcrEngine.h"
+#ifndef Q_OS_WIN
+#include "ocr/RapidOcr.h"
+#endif
 #include "settings/Settings.h"
 #include "translation/TranslationProvider.h"
 #include <memory>
@@ -46,12 +49,16 @@ class EditorSession final : public QObject {
 
   private:
     void initialize();
+    void connectOcr(IOcrEngine &engine, const char *name);
     void notify(QString message, bool error = false);
     void setTask(Task task);
     void startTranslation();
     void setTranslationEnabled(bool enabled);
     bool sourceUnchanged();
-    TesseractOcr ocr;
+    TesseractOcr tesseract;
+#ifndef Q_OS_WIN
+    RapidOcr rapidOcr;
+#endif
     OpenAiTranslationProvider provider;
     Task currentTask = Task::Idle;
     bool translateAfterOcr = false, approvalPending = false;

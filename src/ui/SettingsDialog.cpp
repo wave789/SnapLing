@@ -8,6 +8,7 @@
 #include <QDir>
 #include <QDoubleSpinBox>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QGuiApplication>
 #include <QCoreApplication>
 #include <QFormLayout>
@@ -48,6 +49,9 @@ SettingsDialog::SettingsDialog(Settings &s, ProviderConfig &runtime, QWidget *pa
     auto *captureMethod = new QComboBox(this);
     captureMethod->addItem("系统单次截图（默认，无持续共享）", "screenshot");
     captureMethod->addItem("兼容截图（需要系统选择共享屏幕，取图后结束）", "screencast");
+    if (qEnvironmentVariable("XDG_CURRENT_DESKTOP").split(':').contains("GNOME", Qt::CaseInsensitive)) {
+        captureMethod->setToolTip("GNOME 的单次截图可能有系统闪光。关闭 GNOME 的界面动画可消除闪光，也会影响其他桌面动画。");
+    }
     captureMethod->setCurrentIndex(qMax(0, captureMethod->findData(s.value("capture/waylandMethod", "screenshot"))));
     if (QGuiApplication::platformName().contains("wayland") || qEnvironmentVariable("XDG_SESSION_TYPE") == "wayland")
         general->addRow("截图方式", captureMethod);
@@ -98,25 +102,75 @@ SettingsDialog::SettingsDialog(Settings &s, ProviderConfig &runtime, QWidget *pa
     hint->setTextInteractionFlags(Qt::TextSelectableByMouse);
     hotkeys->addRow(hint);
     auto *ocr = page("OCR");
-    ocr->addRow(new QLabel("引擎：Tesseract 5 LSTM · 完全离线 · 按需初始化"));
-    auto *modelPath = new QLineEdit(s.value("ocr/path", findTessdata()).toString());
+    auto *ocrEngine = new QComboBox;
+    ocrEngine->setObjectName("ocrEngine");
+    ocrEngine->addItem("Tesseract · 简体中文 / 英文", "tesseract");
+#ifndef Q_OS_WIN
+    ocrEngine->addItem("RapidOCR · 简体中文 / 英文", "rapidocr");
+#endif
+    ocrEngine->setCurrentIndex(qMax(0, ocrEngine->findData(s.value("ocr/engine", "tesseract"))));
+    ocr->addRow("识别引擎", ocrEngine);
+    auto *modelPath = new QLineEdit(s.value("ocr/path").toString());
+    modelPath->setPlaceholderText("留空自动查找");
+    modelPath->setToolTip("用户模型可放在 " + userTessdataDirectory());
     auto *choose = new QPushButton("选择模型目录…");
     ocr->addRow("模型目录", modelPath);
     ocr->addRow(choose);
-    connect(choose, &QPushButton::clicked, this, [this, modelPath] {
-        auto path = QFileDialog::getExistingDirectory(this, "选择含 traineddata 的目录", modelPath->text());
-        if (!path.isEmpty())
-            modelPath->setText(path);
-    });
     auto *langs = new QComboBox;
     langs->addItems({"chi_sim+eng", "eng", "chi_sim"});
     langs->setCurrentText(s.value("ocr/languages", "chi_sim+eng").toString());
     ocr->addRow("语言", langs);
+    auto *modelStatus = new QLabel;
+    modelStatus->setWordWrap(true);
+    modelStatus->setTextFormat(Qt::PlainText);
+    modelStatus->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    ocr->addRow(modelStatus);
+    auto resolvePath = [modelPath, langs] {
+        const auto selected = availableTessdata(modelPath->text(), langs->currentText());
+        return selected.isEmpty() ? findTessdata(langs->currentText()) : selected;
+    };
+    auto refreshModels = [modelPath, langs, modelStatus, resolvePath] {
+        const bool customMissing = !modelPath->text().trimmed().isEmpty() &&
+                                   availableTessdata(modelPath->text(), langs->currentText()).isEmpty();
+        const auto path = resolvePath();
+        if (path.isEmpty())
+            modelStatus->setText("未找到所选语言的模型。请选择包含所需 .traineddata 文件的目录。");
+        else
+            modelStatus->setText((customMissing ? "指定目录缺少所选模型，当前使用 " : "当前使用 ") + path);
+    };
+    connect(modelPath, &QLineEdit::textChanged, this, refreshModels);
+    connect(langs, &QComboBox::currentTextChanged, this, refreshModels);
+    refreshModels();
+    connect(choose, &QPushButton::clicked, this, [this, modelPath, resolvePath] {
+        auto path = QFileDialog::getExistingDirectory(this, "选择含 traineddata 的目录", resolvePath());
+        if (!path.isEmpty())
+            modelPath->setText(path);
+    });
     auto *hash = new QPushButton("查看模型大小与 SHA256");
     ocr->addRow(hash);
-    connect(hash, &QPushButton::clicked, this, [this, modelPath] {
-        QMessageBox::information(this, "本地模型完整性", modelInfo(modelPath->text()));
+    connect(hash, &QPushButton::clicked, this, [this, resolvePath] {
+        QMessageBox::information(this, "本地模型完整性", modelInfo(resolvePath()));
     });
+    auto *rapidStatus = new QLabel;
+    rapidStatus->setWordWrap(true);
+    rapidStatus->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    ocr->addRow(rapidStatus);
+    auto showEngineOptions = [ocr, ocrEngine, modelPath, choose, langs, modelStatus, hash, rapidStatus, refreshModels] {
+        const bool rapid = ocrEngine->currentData().toString() == "rapidocr";
+        for (auto *widget : QList<QWidget *>{modelPath, choose, langs, modelStatus, hash})
+            ocr->setRowVisible(widget, !rapid);
+        ocr->setRowVisible(rapidStatus, rapid);
+        if (rapid) {
+            const auto path = ocrModelRoot() + "/RapidOCR";
+            rapidStatus->setText(QFileInfo(path + "/run-ocr").isExecutable()
+                                     ? "模型目录：" + path
+                                     : "请先在终端运行 python3 tools/setup-rapidocr.py。模型目录：" + path);
+        } else {
+            refreshModels();
+        }
+    };
+    connect(ocrEngine, &QComboBox::currentIndexChanged, this, showEngineOptions);
+    showEngineOptions();
     auto *ai = page("AI 翻译");
     auto *preset = new QComboBox;
     preset->addItems({"本地 Ollama", "OpenAI 兼容服务"});
@@ -275,8 +329,9 @@ SettingsDialog::SettingsDialog(Settings &s, ProviderConfig &runtime, QWidget *pa
     layout->addWidget(buttons);
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
     connect(buttons, &QDialogButtonBox::accepted, this,
-            [&, this, config, extraKeys, profiles, startup, theme, background, autoCopy, closeCopy, saveDir,
-             format, quality, jpgBg, history, key, modelPath, langs, cache, days, limit] {
+            [&s, &runtime, this, config, extraKeys, profiles, startup, theme, captureMethod, background,
+             autoCopy, closeCopy, saveDir, format, quality, jpgBg, history, key, ocrEngine, modelPath,
+             langs, cache, days, limit] {
                 if (key->keySequence().count() != 1) {
                     QMessageBox::warning(this, "快捷键无效", "请输入单组快捷键");
                     return;
@@ -310,6 +365,7 @@ SettingsDialog::SettingsDialog(Settings &s, ProviderConfig &runtime, QWidget *pa
                 s.set("general/jpegBackground", jpgBg->text());
                 s.set("history/enabled", history->isChecked());
                 s.set("hotkey/capture", key->keySequence().toString(QKeySequence::PortableText));
+                s.set("ocr/engine", ocrEngine->currentData());
                 s.set("ocr/path", modelPath->text());
                 s.set("ocr/languages", langs->currentText());
                 s.set("ocr/cache", cache->isChecked());

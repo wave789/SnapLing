@@ -11,7 +11,7 @@ C++20 / Qt6 Widgets 截图工具。提供真实桌面捕获、非破坏性标注
 - 原生或 Portal 全局快捷键、冲突提示、单实例命令转发、托盘和独立启动器入口。
 - 矩形、椭圆、直线、箭头、画笔、荧光笔、文字、序号、马赛克、近似模糊、裁剪、旋转、翻转；标注颜色、线宽、字体、透明度、移动、修改和删除；撤销/重做。
 - `.snapling` 版本化工程保存原图、编辑指令、OCR 和翻译布局；PNG 透明导出、JPG 背景色；异步保存图片。
-- 按需初始化的 Tesseract 5 LSTM 本地 OCR，中文/英文/混合；直接在图像上拖选、Unicode 复制、全选、逐行选择、TXT/Markdown 导出。**目前没有接入 RapidOCR/ONNX Runtime**。
+- 本地 OCR 支持默认 Tesseract 和 Linux 上可选的 RapidOCR，识别简体中文和英文。识别后可在原图上拖选文字、复制或导出 TXT/Markdown。
 - Ollama / OpenAI 兼容 HTTP API：供应商配置、环境变量密钥、连接测试、异步翻译、取消、超时、ID 校验、原地译文渲染和图片导出。
 - 简单背景估色覆盖、复杂背景底板、字号自适应、手动调整译文；容纳不了的文字阻止图片导出，工程仍保留完整内容。
 - 贴图、HEX 取色、ZXing 二维码识别、需确认的敏感信息打码建议、可关闭历史、主题与用户登录自动启动。
@@ -29,7 +29,7 @@ sudo apt install build-essential cmake ninja-build pkg-config libxkbcommon-dev q
 ./tools/run.sh
 ```
 
-没有 sudo 的开发机可执行 `python3 tools/bootstrap-local.py`，将经 apt SHA256 校验的依赖提取至 `.deps`。这仅是开发工具，主程序不依赖 Python。详细配置与 Windows 构建见 [BUILD.md](BUILD.md)。
+没有 sudo 的开发机可执行 `python3 tools/bootstrap-local.py`，将经 apt SHA256 校验的依赖提取至 `.deps`。主程序和默认 Tesseract 引擎无需 Python。详细配置与 Windows 构建见 [BUILD.md](BUILD.md)。
 
 源码运行使用 `tools/run.sh`：加载项目内开发依赖，并在启动程序前准备当前用户的桌面入口，供 Wayland Portal 识别 SnapLing。便携包入口为 `dist/SnapLing/snapling`，不需要 `.deps`。
 
@@ -59,6 +59,8 @@ snapling --cancel-capture # 取消尚未完成的截图，恢复主界面
 6. 按 Enter 或点击 ✅ 打开独立高级编辑器，同一份文档保留全部标注、OCR、翻译、撤销与重做历史，可继续裁剪、旋转、翻转、精调译文、保存工程或贴图。复制和保存会保留即时编辑界面，❌ 或 Esc 取消截图。
 
 Wayland 默认请求非交互式 Screenshot，后台解码完整桌面，按 Qt 显示器布局分开覆盖。视频画面被冻结在截图层中，后台播放器继续播放声音；没有暂停播放器或连续复制视频帧。首次截图可能出现系统权限窗口，已授权后是否再次询问由桌面决定。不会主动启动 Ubuntu 系统框选。无 PipeWire 的构建也支持此多屏流程。
+
+Ubuntu GNOME 的白色闪光是系统截图动画。若要关闭闪光并继续使用默认的单次截图，可在自己的桌面会话里运行 `gsettings set org.gnome.desktop.interface enable-animations false`。该设置也会关闭其他 GNOME 动画。恢复系统默认值时运行 `gsettings reset org.gnome.desktop.interface enable-animations`。
 
 即时编辑与高级编辑共享 `Document`、`Canvas` 和 `EditorSession`。OCR、翻译和图片保存异步运行，可在任务执行中继续标注、撤销、复制或进入高级编辑器。错误显示在当前界面的状态提示中。远程翻译通过非阻塞确认控件显示发送目的地。
 
@@ -91,7 +93,15 @@ Wayland 默认请求非交互式 Screenshot，后台解码完整桌面，按 Qt 
 
 ## 离线 OCR
 
-模型随源码提供，约 6.4 MiB，安装至 `share/snapling/tessdata`，无需联网下载。首次点击 OCR 才加载模型。手动导入时选择含 `eng.traineddata` / `chi_sim.traineddata` 的目录。来源、许可证、大小和 SHA256 见 [models/README.md](models/README.md)。
+模型默认集中在 `~/.snapling/ocr`。Tesseract 自带中英文模型，首次自动识别时会将所需的随附模型准备到 `~/.snapling/ocr/tesseract`。设置中的模型目录留空即可自动查找。已有自备模型可以继续使用，缺少所选语言的目录会回退到完整的模型目录。来源、许可证、大小和 SHA256 见 [模型说明](models/README.md)。
+
+在 Ubuntu 上启用 RapidOCR 时，需要系统 Python 的 `venv` 模块。可用 `sudo apt install python3-venv` 安装，然后在源码目录运行下面的命令。
+
+```bash
+/usr/bin/python3 tools/setup-rapidocr.py
+```
+
+安装将 RapidOCR、ONNX Runtime 和模型放在 `~/.snapling/ocr/RapidOCR`。完成后在「设置 → OCR → 识别引擎」选 RapidOCR 并保存，下次识别时生效。当前截图已有识别结果时，点击 OCR 重新识别。初次安装需要联网，识别使用本地模型。可以随时切回 Tesseract。通过 DEB 或 CMake 安装时，脚本位于安装前缀下的 `share/snapling/tools/setup-rapidocr.py`。
 
 识别后直接拖动图中文字；双击选择连续字词，Ctrl+双击选择整行。「选全部文字」「复制全部文字」「导出文字」可保留换行。行框来自引擎，字符位置依据字宽估算，不代表精准字符检测。OCR 高亮不会写入导出的图片。
 

@@ -32,6 +32,9 @@ class TesseractOcr final : public IOcrEngine {
     bool busy = false;
     QTimer progressTimer;
 };
-QString findTessdata();
+QString ocrModelRoot();
+QString userTessdataDirectory();
+QString availableTessdata(QString path, const QString &languages);
+QString findTessdata(const QString &languages = "chi_sim+eng");
 QString modelInfo(QString path);
 } // namespace SnapLing

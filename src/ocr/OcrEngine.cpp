@@ -4,6 +4,7 @@
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QFileInfo>
 #include <QFutureWatcher>
 #include <QMutex>
 #include <QPainter>
@@ -57,20 +58,78 @@ static OcrInput prepareScreenshot(const QImage &image) {
     return input;
 }
 #endif
-QString findTessdata() {
-    QStringList paths{qEnvironmentVariable("TESSDATA_PREFIX"),
-                      QCoreApplication::applicationDirPath() + "/../share/snapling/tessdata",
-                      QCoreApplication::applicationDirPath() + "/tessdata",
-                      QCoreApplication::applicationDirPath() + "/../models/tessdata",
-                      QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + "/tessdata",
-                      "/usr/share/tesseract-ocr/5/tessdata",
-                      "/usr/share/tessdata"};
-    for (auto path : paths)
-        if (!path.isEmpty() && QFile::exists(path + "/eng.traineddata"))
-            return QDir(path).absolutePath();
+QString ocrModelRoot() {
+    const auto configured = qEnvironmentVariable("SNAPLING_OCR_HOME");
+    return QDir::isAbsolutePath(configured) ? QDir::cleanPath(configured)
+                                          : QDir::homePath() + "/.snapling/ocr";
+}
+QString userTessdataDirectory() {
+    return ocrModelRoot() + "/tesseract";
+}
+QString availableTessdata(QString path, const QString &languages) {
+    path = path.trimmed();
+    if (path.isEmpty())
+        return {};
+    if (path == "~")
+        path = QDir::homePath();
+    else if (path.startsWith("~/"))
+        path.replace(0, 1, QDir::homePath());
+    const QDir directory(path);
+    for (const auto &language : languages.split('+')) {
+        if (language.isEmpty())
+            return {};
+        const auto filePath = directory.filePath(language + ".traineddata");
+        const QFileInfo info(filePath);
+        QFile file(filePath);
+        if (!info.isFile() || info.size() <= 0 || !file.open(QIODevice::ReadOnly))
+            return {};
+    }
+    return QDir::cleanPath(directory.absolutePath());
+}
+static QStringList bundledTessdataDirs() {
+    const auto binary = QCoreApplication::applicationDirPath();
+    return {QDir::cleanPath(binary + "/../share/snapling/tessdata"), binary + "/tessdata",
+            QDir::cleanPath(binary + "/../models/tessdata")};
+}
+QString findTessdata(const QString &languages) {
+    const QStringList paths = QStringList{userTessdataDirectory(), qEnvironmentVariable("TESSDATA_PREFIX")} +
+                              bundledTessdataDirs() +
+                              QStringList{QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + "/tessdata",
+                                          QCoreApplication::applicationDirPath() + "/../.deps/usr/share/tesseract-ocr/5/tessdata",
+                                          "/usr/share/tesseract-ocr/5/tessdata", "/usr/share/tessdata"};
+    for (const auto &path : paths) {
+        const auto available = availableTessdata(path, languages);
+        if (!available.isEmpty())
+            return available;
+    }
     return {};
 }
+#ifdef SNAPLING_HAVE_TESSERACT
+static QString prepareTessdata(const QString &configuredPath, const QString &languages) {
+    const auto selected = availableTessdata(configuredPath, languages);
+    if (!selected.isEmpty())
+        return selected;
+    const auto automatic = findTessdata(languages);
+    if (!bundledTessdataDirs().contains(automatic) ||
+        automatic == availableTessdata(qEnvironmentVariable("TESSDATA_PREFIX"), languages))
+        return automatic;
+    const QDir destination(userTessdataDirectory());
+    if (!QDir().mkpath(destination.absolutePath()))
+        return automatic;
+
+    // Copy bundled defaults once and retain any models the user supplied.
+    for (const QString &language : {QStringLiteral("eng"), QStringLiteral("chi_sim")}) {
+        const auto file = language + ".traineddata";
+        if (!destination.exists(file))
+            QFile::copy(QDir(automatic).filePath(file), destination.filePath(file));
+    }
+    const auto installed = availableTessdata(destination.absolutePath(), languages);
+    return installed.isEmpty() ? automatic : installed;
+}
+#endif
 QString modelInfo(QString path) {
+    if (path.isEmpty())
+        return "未找到所选语言的 Tesseract 模型。";
     QStringList info;
     for (QString language : {"eng", "chi_sim"}) {
         QFile f(path + "/" + language + ".traineddata");
@@ -120,6 +179,13 @@ void TesseractOcr::release() {
     });
 }
 void TesseractOcr::recognize(QImage image, QString path, QString languages, bool cache) {
+#ifndef SNAPLING_HAVE_TESSERACT
+    Q_UNUSED(image)
+    Q_UNUSED(path)
+    Q_UNUSED(languages)
+    Q_UNUSED(cache)
+    emit failed("此构建未包含 OCR 引擎");
+#else
     if (busy) {
         emit failed("OCR 正在运行，请先取消或等待完成");
         return;
@@ -128,13 +194,6 @@ void TesseractOcr::recognize(QImage image, QString path, QString languages, bool
         emit failed("没有可识别的图像");
         return;
     }
-    if (path.isEmpty())
-        path = findTessdata();
-    for (auto lang : languages.split('+'))
-        if (!QFile::exists(path + "/" + lang + ".traineddata")) {
-            emit failed("OCR 模型缺失：" + lang + "。请在设置中导入可信的 traineddata 模型。");
-            return;
-        }
     token = std::make_shared<CancelToken>();
     auto t = token;
     auto s = state;
@@ -164,12 +223,19 @@ void TesseractOcr::recognize(QImage image, QString path, QString languages, bool
             emit completed(r.lines, r.ms, r.cold);
         }
     });
-    w->setFuture(QtConcurrent::run([s, t, image = std::move(image), path, languages, cache] {
+    w->setFuture(QtConcurrent::run([s, t, image = std::move(image), configuredPath = path.trimmed(), languages, cache] {
         Result r;
         QElapsedTimer timer;
         timer.start();
+        const auto path = prepareTessdata(configuredPath, languages);
+        if (path.isEmpty()) {
+            const auto location = configuredPath.isEmpty() ? QString() : "已设置目录：" + configuredPath + "\n";
+            r.error = location + "缺少 OCR 模型（" + languages + "）。请还原项目自带模型，"
+                      "或在设置 → OCR 中选择包含所需 .traineddata 文件的目录。用户模型目录：" +
+                      userTessdataDirectory();
+            return r;
+        }
         QMutexLocker lock(&s->mutex);
-#ifdef SNAPLING_HAVE_TESSERACT
         r.cold = !s->api || s->path != path || s->languages != languages;
         if (r.cold) {
             s->api = std::make_unique<tesseract::TessBaseAPI>();
@@ -260,13 +326,9 @@ void TesseractOcr::recognize(QImage image, QString path, QString languages, bool
         s->api->Clear();
         if (!cache)
             s->api.reset();
-#else
-        Q_UNUSED(image)
-        Q_UNUSED(cache)
-        r.error = "此构建未包含 OCR 引擎";
-#endif
         r.ms = timer.elapsed();
         return r;
     }));
+#endif
 }
 } // namespace SnapLing

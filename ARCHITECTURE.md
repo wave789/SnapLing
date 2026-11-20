@@ -38,7 +38,9 @@
 
 ## OCR
 
-`IOcrEngine` 的当前生产实现为 Tesseract 5 LSTM，未接入 RapidOCR。模型在 QtConcurrent 工作线程按需初始化；缓存受设置控制，使用 mutex 保护引擎状态。输入在工作线程合成透明背景、灰度化，对以暗色为主的画面反色，并在原图不超过 4 Mi 像素时放大两倍，添加留白。PSM_SPARSE_TEXT 识别多窗口分散文字，按词间距分开远隔文字并汇总置信度；边距与缩放统一逆映射回原图像素。ETEXT_DESC 提供取消、45 秒期限和实际进度，GUI 用定时器读取原子进度。
+`IOcrEngine` 支持默认 Tesseract 5 LSTM 和可选 RapidOCR。Tesseract 在 QtConcurrent 工作线程按需初始化，使用 mutex 保护可缓存的引擎状态。输入在工作线程合成透明背景并灰度化，对以暗色为主的画面反色，在原图不超过 4 Mi 像素时放大两倍并添加留白。PSM_SPARSE_TEXT 识别多窗口分散文字，按词间距分开远隔文字并汇总置信度。边距与缩放统一逆映射回原图像素。ETEXT_DESC 提供取消、45 秒期限和实际进度，GUI 用定时器读取原子进度。
+
+RapidOCR 用 QtConcurrent 将输入写到应用私有临时目录，再由 QProcess 异步启动本地 CPU 推理。识别文字、置信度和四点坐标通过 JSON 返回，与 Tesseract 一样映射为 `OcrLine`，供选字和翻译使用。识别完成或取消后清理临时图片。
 
 每个 OcrLine 包含文本、行矩形、多边形、置信度、阅读顺序、段落、方向字段和字符估算标记。当前方向为水平，垂直/复杂版面未专项支持。TextLayout 使用 Unicode grapheme 划分，不拆开 surrogate pair 或组合字符；字符宽度来自字体度量，框明确标记为估算值。鼠标拖选得到结构化的行区间，翻译选中文字时只发送对应区间。
 

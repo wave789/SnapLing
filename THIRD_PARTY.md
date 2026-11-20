@@ -14,4 +14,4 @@
 | PipeWire / SPA | 1.6.2 | 授权后的帧读取 | https://gitlab.freedesktop.org/pipewire/pipewire · MIT |
 | ZXing-C++ | 2.3.0 | 可选二维码 | https://github.com/zxing-cpp/zxing-cpp · Apache-2.0 |
 
-未引入 OpenCV、ONNX Runtime、RapidOCR、浏览器内核，也没有通过 Python 运行主程序。编译器、平台库、字体、OpenSSL 等传递依赖按构建系统和发行版版本解析。发布包需保留实际所含组件的完整许可证，允许接收者替换 LGPL 动态库；不要将可选 GPL 插件与本应用许可证混为一谈。
+可选的 RapidOCR 由用户运行安装脚本后从 PyPI 安装到独立环境，依赖 [RapidOCR](https://github.com/RapidAI/RapidOCR)（Apache-2.0）、[ONNX Runtime](https://github.com/microsoft/onnxruntime)（MIT）和 Python 包声明的依赖。默认发布包不包含这些依赖。编译器、平台库、字体和 OpenSSL 等传递依赖由构建系统和发行版提供。发布包须保留实际所含组件的完整许可证，允许接收者替换 LGPL 动态库。

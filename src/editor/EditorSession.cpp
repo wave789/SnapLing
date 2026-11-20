@@ -47,38 +47,10 @@ void EditorSession::initialize() {
         if (currentTask == Task::Idle && !approvalPending)
             setTranslationEnabled(document.state().translationMode != 0 && !document.state().translations.isEmpty());
     });
-    connect(&ocr, &IOcrEngine::progress, this, [this](int percent) {
-        notify(QString("正在本地 OCR：%1% · 可继续标注或进入高级编辑器").arg(percent));
-    });
-    connect(&ocr, &IOcrEngine::completed, this, [this](auto lines, qint64 ms, bool cold) {
-        if (!sourceUnchanged()) {
-            setTask(Task::Idle);
-            return;
-        }
-        document.change([lines](auto &state) {
-            state.ocr = lines;
-            state.translations.clear();
-            state.translationMode = 0;
-        });
-        setTask(Task::Idle);
-        notify(QString("OCR 完成，%1 行，%2 ms").arg(lines.size()).arg(ms));
-        qInfo("ocr_ms=%lld cold=%d lines=%lld", ms, int(cold), qint64(lines.size()));
-        if (translateAfterOcr) {
-            translateAfterOcr = false;
-            translationLines = lines;
-            startTranslation();
-        }
-    });
-    connect(&ocr, &IOcrEngine::failed, this, [this](QString error) {
-        const bool translating = translateAfterOcr;
-        translateAfterOcr = false;
-        setTask(Task::Idle);
-        if (translating)
-            setTranslationEnabled(false);
-        if (!translationEnabled && error.contains("取消"))
-            return;
-        notify(error, true);
-    });
+    connectOcr(tesseract, "tesseract");
+#ifndef Q_OS_WIN
+    connectOcr(rapidOcr, "rapidocr");
+#endif
     connect(&provider, &ITranslationProvider::completed, this, [this](auto units, qint64 ms) {
         setTask(Task::Idle);
         if (!translationEnabled)
@@ -110,6 +82,40 @@ void EditorSession::initialize() {
         notify(error, true);
     });
 }
+void EditorSession::connectOcr(IOcrEngine &engine, const char *name) {
+    connect(&engine, &IOcrEngine::progress, this, [this](int percent) {
+        notify(QString("正在本地 OCR：%1% · 可继续标注或进入高级编辑器").arg(percent));
+    });
+    connect(&engine, &IOcrEngine::completed, this, [this, name](auto lines, qint64 ms, bool cold) {
+        if (!sourceUnchanged()) {
+            setTask(Task::Idle);
+            return;
+        }
+        document.change([lines](auto &state) {
+            state.ocr = lines;
+            state.translations.clear();
+            state.translationMode = 0;
+        });
+        setTask(Task::Idle);
+        notify(QString("OCR 完成，%1 行，%2 ms").arg(lines.size()).arg(ms));
+        qInfo("ocr_ms=%lld cold=%d lines=%lld engine=%s", ms, int(cold), qint64(lines.size()), name);
+        if (translateAfterOcr) {
+            translateAfterOcr = false;
+            translationLines = lines;
+            startTranslation();
+        }
+    });
+    connect(&engine, &IOcrEngine::failed, this, [this](QString error) {
+        const bool translating = translateAfterOcr;
+        translateAfterOcr = false;
+        setTask(Task::Idle);
+        if (translating)
+            setTranslationEnabled(false);
+        if (!translationEnabled && error.contains("取消"))
+            return;
+        notify(error, true);
+    });
+}
 void EditorSession::runOcr(bool thenTranslate) {
     if (currentTask != Task::Idle || approvalPending) {
         notify("识别或翻译任务正在运行，可继续编辑或取消当前任务。");
@@ -121,9 +127,14 @@ void EditorSession::runOcr(bool thenTranslate) {
     sourceKey = document.original().cacheKey();
     setTask(Task::Ocr);
     notify("正在本地识别文字… 可继续编辑");
-    ocr.recognize(document.original(), settings.value("ocr/path", findTessdata()).toString(),
-                  settings.value("ocr/languages", "chi_sim+eng").toString(),
-                  settings.value("ocr/cache", true).toBool());
+    IOcrEngine *engine = &tesseract;
+#ifndef Q_OS_WIN
+    if (settings.value("ocr/engine").toString() == "rapidocr")
+        engine = &rapidOcr;
+#endif
+    engine->recognize(document.original(), settings.value("ocr/path").toString(),
+                      settings.value("ocr/languages", "chi_sim+eng").toString(),
+                      settings.value("ocr/cache", true).toBool());
 }
 void EditorSession::translate(QVector<OcrLine> selected) {
     if (currentTask != Task::Idle || approvalPending) {
@@ -209,7 +220,10 @@ void EditorSession::cancel() {
     translateAfterOcr = false;
     if (approvalPending)
         approveTranslation(false);
-    ocr.cancel();
+    tesseract.cancel();
+#ifndef Q_OS_WIN
+    rapidOcr.cancel();
+#endif
     provider.cancel();
 }
 void EditorSession::copyImage() {

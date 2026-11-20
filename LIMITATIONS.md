@@ -13,7 +13,7 @@
 
 ## 尚未完成的实现
 
-- OCR 采用 Tesseract 5，**RapidOCR C++ / ONNX Runtime 尚未接入**。现有接口是真实本地推理，中文/英文已测试，但小字号、旋转、复杂版面通常需要进一步调优。
+- 默认 OCR 使用 Tesseract 5。Linux 可切换到使用 Python 和 ONNX Runtime CPU 的 RapidOCR。RapidOCR 每次识别会启动独立进程并加载模型。小字号、旋转和复杂版面的识别效果取决于引擎和输入。
 - OCR 当前是行框及估算字符位置；方向字段默认为水平，尚无竖排专项处理。字体宽度、比例字体与复杂脚本可能导致选择边界偏差。Markdown 仅保留换行，不自动重建表格；代码缩进依赖引擎的空格识别。
 - Windows 没有 Windows Graphics Capture 独立窗口后端，使用 GDI 可见桌面裁切。混合 DPI 源码已处理但缺少真实双屏 Windows 验证。
 - 默认单次截图和可选 ScreenCast 均支持多屏，**没有通过真实 GNOME 三屏视频播放验收**。目前区域框选限于单块屏幕内；尚无跨多个输出连续拖动的选区。ScreenCast 仅接受可映射 CPU RGB 帧，显示器/会话变化会停止旧共享。DMA-BUF、动态设备变化和长时间稳定性仍需进一步测试。

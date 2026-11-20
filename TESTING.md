@@ -29,6 +29,12 @@ HTTP 测试服务器仅作为 **测试替身**，生产代码通过 QNetworkAcce
 
 另在隔离的 GNOME Shell/Mutter 48.7 Wayland 会话中运行了 SnapLing、Ubuntu 26.04 的 xdg-desktop-portal 1.21.1、GNOME 截图后端 48.0 和真实权限库。在其他应用拥有焦点时，已注册的后台截图请求返回 2，系统日志为 `Only the focused app is allowed to show a system access dialog`。新流程在主窗口获得焦点后显示 GNOME 授权弹窗。用鼠标点击允许，SnapLing 隐藏主窗口，取得三个 800×600 虚拟显示器的 2400×600 桌面图。在第三屏拖选后立即出现标注工具栏。再次触发时只请求一次截图。此桌面验证使用命令触发和鼠标操作，物理外接显示器与用户设备上的系统快捷键仍需实机验证。[系统授权弹窗](docs/validation/gnome-screenshot-consent.jpg) · [第三屏拖选后的工具栏](docs/validation/gnome-third-display-edit.jpg)
 
+同一 GNOME 环境的三屏闪光对照测试使用 `--force-animations`，并在每个屏幕分别以 60 帧每秒采样像素。`org.gnome.desktop.interface enable-animations` 为 `true` 时三屏均出现白闪，为 `false` 时三屏均未出现白闪。两种设置下同一个单次截图入口均取得 2400×600 PNG 并显示三块选区覆盖层。GNOME 50 的截图后端同样请求 `flash=true`，Shell 的闪光采用遵循该动画设置的过渡。[GNOME 50 截图后端](https://github.com/GNOME/xdg-desktop-portal-gnome/blob/50.0/src/screenshotdialog.c#L247-L255) · [GNOME 50.1 动画设置](https://github.com/GNOME/gnome-shell/blob/50.1/js/misc/animationUtils.js#L13-L31)
+
+启动对照使用 Ubuntu 26.04 的 Qt 6.10.2 客户端和隔离 GNOME/Mutter 48.7。旧版从终端启动会留下两个未完成的启动通知，约 16 秒后光标才恢复。修复后终端启动无等待光标。使用 GNOME 应用菜单启动时，新版只提交一次已有的启动令牌，主窗口获得焦点，等待光标随启动完成而恢复。
+
+OCR 回归覆盖旧路径失效、英文模型目录遮住中英文模型、`~/` 路径和首次自动复制随附模型。RapidOCR 在 Linux x86-64 的 Python 3.12 和 3.14 独立环境中完成真实模型安装和中英文识别。可在准备 RapidOCR 后运行 `QT_QPA_PLATFORM=offscreen SNAPLING_TEST_RAPIDOCR=1 build/snapling_tests realRapidOcrEngineSwitch`。用例通过设置窗口保存引擎选择，在同一编辑会话中执行 Tesseract → RapidOCR → Tesseract，验证识别文字和原图坐标。可用 `SNAPLING_OCR_HOME` 指向隔离的模型根目录。
+
 用户目录安装验证包含带空格的临时前缀：使用真实 Gio.DesktopAppInfo 读取生成的 desktop 文件，并通过该入口以 `--version` 启动已安装程序，检查绝对 Exec 路径、引号和安装 manifest。不要只用文件是否存在代替桌面入口有效性检查。
 
 源码启动验证使用临时 XDG 目录：从没有入口的状态运行 `tools/run.sh --background --exit-after 200`，检查 `desktop_entry_installed=1`；通过真实 Gio 启动生成入口的 `--version`，检查失效入口修复、重复准备、带空格的源码路径，以及准备失败时不会继续启动 Qt。另检查 `--quit`/`--help`/`--version` 不写入口，其他应用入口不变，源码入口忽略打包 `DESTDIR`，正式安装仍保留正确的运行时 Exec 和 manifest。
