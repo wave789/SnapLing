@@ -33,6 +33,8 @@ sudo apt install build-essential cmake ninja-build pkg-config libxkbcommon-dev q
 
 源码运行使用 `tools/run.sh`：加载项目内开发依赖，并在启动程序前准备当前用户的桌面入口，供 Wayland Portal 识别 SnapLing。便携包入口为 `dist/SnapLing/snapling`，不需要 `.deps`。
 
+编译后运行 `./tools/install.sh`，即可把程序安装到 `~/.local/snapling`，并从 Ubuntu 应用菜单启动。用户目录安装无需 sudo。[Linux 安装说明](BUILD.md#linux-安装)
+
 ```bash
 snapling --capture        # 矩形选区
 snapling --full           # 全屏，显示器可在主界面选择
@@ -83,11 +85,11 @@ Ubuntu GNOME 的白色闪光是系统截图动画。若要关闭闪光并继续�
 ./tools/run.sh
 ```
 
-入口写入 `${XDG_DATA_HOME:-$HOME/.local/share}/applications`，指向当前源码目录中 `tools/run.sh` 的绝对路径，应用菜单启动也会加载开发依赖。已有失效入口会更新；准备失败时会显示具体路径并停止启动。`--quit`、`--help` 和 `--version` 不写入口。也可单独运行 `./tools/install-desktop.sh` 准备入口。
+源码入口写入 `${XDG_DATA_HOME:-$HOME/.local/share}/applications`，指向当前源码目录中的 `tools/run.sh`。有效的用户安装入口优先使用。已有失效入口会更新，准备失败时会显示具体路径并停止启动。`--quit`、`--help` 和 `--version` 不写入口。也可单独运行 `./tools/install-desktop.sh` 准备入口。
 
 `desktop_entry_installed=1` 只说明身份文件存在，不代表截图连接已经注册成功。新版为单次截图建立独立 D-Bus 连接，先等待 `Register(io.snapling.SnapLing)` 成功，再在同一连接请求 Screenshot；正常会打印 `portal_identity=registered app_id=io.snapling.SnapLing connection=dedicated`。这样不会沿用 Qt 共享连接被缓存的“未识别应用”身份，也不需要修改那条共用拒绝记录。
 
-正式安装仍可执行 `cmake --install build --prefix "$HOME/.local"`。Linux 安装时 desktop 文件的 Exec 写为安装目录中程序的绝对路径，避免 Portal 的 PATH 中还没有 `~/.local/bin` 而无法识别。源码启动入口指向当前源码目录；移动源码后重新执行新位置的 `tools/run.sh`，或重新正式安装以更新入口。
+`./tools/install.sh` 会把 `~/.local/snapling` 中的桌面入口链接到用户的 XDG 应用目录。桌面入口使用已安装程序的绝对路径，Portal 可以直接找到它。可用 `./tools/install.sh --prefix /绝对路径` 指定其他用户安装目录。
 
 退出旧进程后重新运行，按截图快捷键或点击「开始截图」，在系统询问时允许 SnapLing 截图。只有 SnapLing 自己保存了拒绝记录时，才需点击「重新请求截图授权」。不支持 Registry 的旧 Portal 明确打印 `portal_identity=legacy_unverified`，仍使用系统推断的身份；此时可从已安装的应用启动器运行。注册失败会显示原因并停止本次截图，不悄悄切回未识别身份或开启共享。仍有错误时请保留 `portal_identity`、权限状态及服务日志；程序不会自动清空共用权限或重启桌面服务。
 

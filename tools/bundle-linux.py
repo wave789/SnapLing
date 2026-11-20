@@ -10,6 +10,9 @@ qmake=shutil.which('qmake6')
 if qmake:
     result=subprocess.run([qmake,'-query','QT_INSTALL_PLUGINS'],capture_output=True,text=True)
     qt_candidates.insert(0,pathlib.Path(result.stdout.strip()))
+    # qmake from an extracted Debian/Ubuntu prefix may report the system path.
+    if result.returncode == 0:
+        qt_candidates.insert(0,pathlib.Path('.deps') / result.stdout.strip().lstrip('/'))
 qt=next((p for p in qt_candidates if (p/'platforms').is_dir()),None)
 if not qt: raise SystemExit('找不到 Qt 平台插件')
 queue=[root/'bin/snapling']
@@ -28,7 +31,7 @@ while queue:
     binary=queue.pop()
     result=subprocess.run(['ldd',str(binary)],capture_output=True,text=True)
     if 'not found' in result.stdout:raise SystemExit(result.stdout)
-    for name,path in re.findall(r'^\s*(\S+) => (/\S+)',result.stdout,re.M):
+    for name,path in re.findall(r'^\s*(\S+) => (/.+?)\s+\(0x[0-9a-fA-F]+\)\s*$',result.stdout,re.M):
         if name in seen or excluded.match(name):continue
         seen.add(name);dest=libs/name
         if pathlib.Path(path).resolve()!=dest.resolve():shutil.copy2(path,dest,follow_symlinks=True)

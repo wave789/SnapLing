@@ -13,6 +13,15 @@ if [[ "$snapling_data_home" != /* ]]; then
     printf '%s\n' 'XDG_DATA_HOME 必须是绝对路径，无法准备 SnapLing 桌面入口。' >&2
     exit 1
 fi
+snapling_desktop="$snapling_data_home/applications/io.snapling.SnapLing.desktop"
+# Keep the entry registered by the user installer while the installed app still exists.
+if [[ -L "$snapling_desktop" && -f "$snapling_desktop" ]]; then
+    snapling_installed_entry="$(readlink -f -- "$snapling_desktop")"
+    snapling_installed_prefix="${snapling_installed_entry%/share/applications/io.snapling.SnapLing.desktop}"
+    if [[ "$snapling_installed_prefix" != "$snapling_installed_entry" && -x "$snapling_installed_prefix/bin/snapling" ]]; then
+        exit 0
+    fi
+fi
 # This is a live user launcher, never a package staging install.
 # Point to run.sh so desktop-menu launches also load any local development libraries.
 if ! env -u DESTDIR cmake \

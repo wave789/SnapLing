@@ -35,11 +35,15 @@ Wayland 默认使用非交互式 Screenshot Portal，支持单次完整桌面和
 
 ## Linux 安装
 
+编译完成后运行用户安装脚本。
+
 ```bash
-cmake --install build --prefix "$HOME/.local"
+./tools/install.sh
 ```
 
-可执行文件安装至 `bin`，启动器至 `share/applications`，图标至 `share/icons`，模型至 `share/snapling/tessdata`。确保 `~/.local/bin` 在 PATH 中。系统安装可使用 `/usr/local` 前缀。
+程序、资源和文档统一安装到 `~/.local/snapling`。脚本会把该目录内的桌面入口链接到 `${XDG_DATA_HOME:-$HOME/.local/share}/applications`，供应用菜单和截图 Portal 查找。可从应用菜单启动，或运行安装完成时打印的绝对路径。通过 `.deps` 构建时，脚本会一并收集运行库并在安装根目录生成 `snapling` 启动器。
+
+重复执行可更新安装。若旧进程在运行，请从托盘退出后启动新版。可用 `./tools/install.sh --prefix /绝对路径` 更换用户安装目录。构建 DEB 或执行系统安装时，继续使用相应的打包脚本或 `cmake --install build --prefix /usr/local`。
 
 ```bash
 ./tools/package-linux.sh
