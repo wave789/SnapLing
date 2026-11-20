@@ -66,12 +66,14 @@ const QDBusArgument &operator>>(const QDBusArgument &arg, VideoNode &node) {
 }
 // 测试专属 D-Bus 服务，所有屏幕数据都由当前测试创建。
 static QDBusObjectPath respond(QObject *context, const QVariantMap &options, uint code,
-                               QVariantMap results, int delay = 0) {
+                               QVariantMap results, int delay = 0, QString caller = {}) {
     auto bus = QDBusConnection::sessionBus();
-    const auto sender = bus.baseService().mid(1).replace('.', '_');
+    const auto sender = (caller.isEmpty() ? bus.baseService() : caller).mid(1).replace('.', '_');
     const auto path = portalRoot + "/request/" + sender + "/" + options["handle_token"].toString();
-    QTimer::singleShot(delay, context, [bus, path, code, results] {
-        auto response = QDBusMessage::createSignal(path, "org.freedesktop.portal.Request", "Response");
+    QTimer::singleShot(delay, context, [bus, path, code, results, caller] {
+        auto response = caller.isEmpty()
+                            ? QDBusMessage::createSignal(path, "org.freedesktop.portal.Request", "Response")
+                            : QDBusMessage::createTargetedSignal(caller, path, "org.freedesktop.portal.Request", "Response");
         response.setArguments({code, results});
         bus.send(response);
     });
@@ -114,7 +116,48 @@ class PermissionStorePortal : public QObject, protected QDBusContext {
         records[app] = permissions;
     }
 };
-class ScreenshotPortal : public QObject {
+struct RegistryState {
+    QMap<QString, QString> identities;
+    QStringList operations, registeredSenders, screenshotSenders;
+    bool supported = true, fail = false, cacheOnFailure = false;
+    int delay = 0;
+};
+class RegistryPortal : public QDBusAbstractAdaptor {
+    Q_OBJECT
+    Q_CLASSINFO("D-Bus Interface", "org.freedesktop.host.portal.Registry")
+  public:
+    RegistryPortal(QObject *parent, RegistryState &state) : QDBusAbstractAdaptor(parent), state(state) {}
+    RegistryState &state;
+  public slots:
+    void Register(const QString &appId, const QVariantMap &, const QDBusMessage &call) {
+        const auto sender = call.service();
+        state.operations << "Register:" + sender;
+        call.setDelayedReply(true);
+        auto error = [call](QString name, QString message) {
+            QDBusConnection::sessionBus().send(call.createErrorReply(name, message));
+        };
+        if (!state.supported) {
+            error("org.freedesktop.DBus.Error.UnknownInterface", "test legacy portal");
+            return;
+        }
+        if (state.identities.contains(sender)) {
+            error("org.freedesktop.portal.Error.Failed", "Connection already associated with an application ID");
+            return;
+        }
+        if (state.fail) {
+            if (state.cacheOnFailure)
+                state.identities[sender] = appId;
+            error("org.freedesktop.portal.Error.Failed", "test registry failure");
+            return;
+        }
+        QTimer::singleShot(state.delay, this, [this, call, sender, appId] {
+            state.identities[sender] = appId;
+            state.registeredSenders << sender;
+            QDBusConnection::sessionBus().send(call.createReply());
+        });
+    }
+};
+class ScreenshotPortal : public QObject, protected QDBusContext {
     Q_OBJECT
     Q_CLASSINFO("D-Bus Interface", "org.freedesktop.portal.Screenshot")
     Q_PROPERTY(uint version READ version CONSTANT)
@@ -125,13 +168,21 @@ class ScreenshotPortal : public QObject {
     int delay = 0;
     QList<bool> requests;
     PermissionStorePortal *permissions = nullptr;
+    RegistryState *registry = nullptr;
     bool respectPermissions = false;
   public slots:
     QDBusObjectPath Screenshot(const QString &, const QVariantMap &options) {
         requests << options["interactive"].toBool();
-        const bool denied = respectPermissions && permissions->records.value("io.snapling.SnapLing").contains("no");
+        const auto caller = message().service();
+        // 模拟真实 Portal：第一个请求固定该唯一连接的身份，之后不能再 Register。
+        if (!registry->identities.contains(caller))
+            registry->identities[caller] = {};
+        registry->operations << "Screenshot:" + caller;
+        registry->screenshotSenders << caller;
+        const auto id = registry->identities.value(caller);
+        const bool denied = respectPermissions && permissions->records.value(id).contains("no");
         const uint response = denied ? 2 : code;
-        return respond(this, options, response, response ? QVariantMap{} : QVariantMap{{"uri", uri}}, delay);
+        return respond(this, options, response, response ? QVariantMap{} : QVariantMap{{"uri", uri}}, delay, caller);
     }
 };
 class ScreenCastPortal : public QDBusAbstractAdaptor {
@@ -221,6 +272,8 @@ class TestCaptureFlow : public QObject {
     Q_OBJECT
   private:
     ScreenshotPortal screenshot;
+    RegistryState registryState;
+    RegistryPortal registry{&screenshot, registryState};
     PermissionStorePortal permissionStore;
     ScreenCastPortal screenCast{&screenshot};
     QTemporaryDir images;
@@ -281,6 +334,7 @@ class TestCaptureFlow : public QObject {
         QVERIFY(bus.registerObject("/org/freedesktop/impl/portal/PermissionStore", &permissionStore,
                                   QDBusConnection::ExportAllSlots));
         screenshot.permissions = &permissionStore;
+        screenshot.registry = &registryState;
         QVERIFY(bus.registerObject(portalRoot, &screenshot,
             QDBusConnection::ExportAllSlots | QDBusConnection::ExportAllProperties | QDBusConnection::ExportAdaptors));
         QCOMPARE(PortalRequest::version("org.freedesktop.portal.ScreenCast"), uint(4));
@@ -298,6 +352,7 @@ class TestCaptureFlow : public QObject {
         screenshot.requests.clear();
         screenshot.code = 0;
         screenshot.respectPermissions = false;
+        registryState = {};
         permissionStore.records.clear();
         permissionStore.writes = 0;
         permissionStore.rejectWrite = false;
@@ -771,6 +826,8 @@ class TestCaptureFlow : public QObject {
     }
     void oneShotAllMonitors() {
         QFETCH(int, target);
+        permissionStore.records[""] = {"no"};
+        screenshot.respectPermissions = true;
         testLayout = {{"eDP-1", {0, 0, 960, 600}, {}, 1},
                       {"HDMI-1", {-1280, 0, 1280, 720}, {}, 1.5},
                       {"DP-1", {960, -180, 800, 600}, {}, 2}};
@@ -803,6 +860,8 @@ class TestCaptureFlow : public QObject {
         QCOMPARE(screenCast.created, 0);
         QCOMPARE(screenCast.opened, 0);
         QVERIFY(!capture->sharing());
+        QCOMPARE(permissionStore.records.value(""), QStringList{"no"});
+        QCOMPARE(permissionStore.writes, 0);
         // 三块屏幕的视频不会导致重复 Screenshot 调用或后台流连接。
         QTest::qWait(80);
         QCOMPARE(screenshot.requests.size(), 1);
@@ -820,13 +879,123 @@ class TestCaptureFlow : public QObject {
         QTRY_COMPARE(frames.size(), 1);
         QCOMPARE(screenshot.requests, (QList<bool>{false, false}));
     }
+    void dedicatedIdentityAvoidsRememberedHostDenial() {
+        permissionStore.records = {{"", {"no"}}, {"another.app", {"yes"}}};
+        screenshot.respectPermissions = true;
+        // 先复现旧实现：共享连接被缓存为空身份，收到与用户相同的 code=2、无 URI。
+        bool denied = false;
+        auto *oldRequest = new PortalRequest(this);
+        oldRequest->call("org.freedesktop.portal.Screenshot", "Screenshot", {QString()},
+                         {{"interactive", false}}, [&](uint code, QVariantMap data, QString) {
+            QCOMPARE(code, uint(2));
+            QVERIFY(!data.contains("uri"));
+            denied = true;
+        });
+        QTRY_VERIFY(denied);
+        const auto sharedSender = QDBusConnection::sessionBus().baseService();
+        QVERIFY(registryState.identities.contains(sharedSender));
+        QVERIFY(registryState.identities.value(sharedSender).isEmpty());
+        auto capture = backend(false);
+        QSignalSpy frames(capture.get(), &ICaptureBackend::captured), errors(capture.get(), &ICaptureBackend::failed);
+        capture->capture(CaptureMode::Region);
+        QTRY_COMPARE(frames.size(), 1);
+        QVERIFY(errors.isEmpty());
+        QCOMPARE(registryState.registeredSenders.size(), 1);
+        const auto registered = registryState.registeredSenders.first();
+        QVERIFY(registered != sharedSender);
+        QCOMPARE(registryState.screenshotSenders.last(), registered);
+        QCOMPARE(registryState.identities.value(registered), QString("io.snapling.SnapLing"));
+        const auto registerIndex = registryState.operations.indexOf("Register:" + registered);
+        QVERIFY(registerIndex >= 0);
+        QVERIFY(registryState.operations.indexOf("Screenshot:" + registered) > registerIndex);
+        QCOMPARE(permissionStore.records.value(""), QStringList{"no"});
+        QCOMPARE(permissionStore.records.value("another.app"), QStringList{"yes"});
+        QVERIFY(!permissionStore.records.contains("io.snapling.SnapLing"));
+        QCOMPARE(permissionStore.writes, 0);
+        QCOMPARE(screenCast.created, 0);
+        capture->capture(CaptureMode::Region);
+        QTRY_COMPARE(frames.size(), 2);
+        QCOMPARE(registryState.registeredSenders.size(), 1);
+        QCOMPARE(registryState.screenshotSenders.last(), registered);
+    }
+    void identityRegistrationFailureDoesNotUseAnonymousScreenshot() {
+        registryState.fail = true;
+        registryState.cacheOnFailure = true;
+        permissionStore.records[""] = {"no"};
+        auto capture = backend(false);
+        QSignalSpy frames(capture.get(), &ICaptureBackend::captured), errors(capture.get(), &ICaptureBackend::failed);
+        capture->capture(CaptureMode::Region);
+        QTRY_COMPARE(errors.size(), 1);
+        QVERIFY(errors.first().first().toString().contains("无法注册"));
+        QVERIFY(screenshot.requests.isEmpty());
+        QVERIFY(frames.isEmpty());
+        QCOMPARE(permissionStore.writes, 0);
+        QCOMPARE(permissionStore.records.value(""), QStringList{"no"});
+        registryState.fail = false;
+        capture->capture(CaptureMode::Region);
+        QTRY_COMPARE(frames.size(), 1);
+        QCOMPARE(registryState.registeredSenders.size(), 1);
+        QVERIFY(registryState.operations.first() != "Register:" + registryState.registeredSenders.first());
+    }
+    void cancelDuringIdentityRegistrationAndRetry() {
+        registryState.delay = 100;
+        auto capture = backend(false);
+        QSignalSpy frames(capture.get(), &ICaptureBackend::captured);
+        capture->capture(CaptureMode::Region);
+        QTRY_COMPARE(registryState.operations.size(), 1);
+        capture->cancel();
+        capture->capture(CaptureMode::Region);
+        QTRY_COMPARE(frames.size(), 1);
+        QTest::qWait(150);
+        QCOMPARE(frames.size(), 1);
+        QCOMPARE(registryState.registeredSenders.size(), 1);
+        QCOMPARE(screenshot.requests.size(), 1);
+    }
+    void backendDestroyedWhileRegisteringDoesNotCapture() {
+        registryState.delay = 100;
+        auto capture = backend(false);
+        capture->capture(CaptureMode::Region);
+        QTRY_COMPARE(registryState.operations.size(), 1);
+        capture.reset();
+        QTest::qWait(150);
+        QVERIFY(screenshot.requests.isEmpty());
+    }
+    void oldPortalWithoutRegistryKeepsLegacyCapture() {
+        registryState.supported = false;
+        permissionStore.records[""] = {"yes"};
+        screenshot.respectPermissions = true;
+        auto capture = backend(false);
+        QSignalSpy frames(capture.get(), &ICaptureBackend::captured);
+        capture->capture(CaptureMode::Region);
+        QTRY_COMPARE(frames.size(), 1);
+        capture->capture(CaptureMode::Region);
+        QTRY_COMPARE(frames.size(), 2);
+        QCOMPARE(registryState.operations.count("Register:" + registryState.screenshotSenders.first()), 1);
+        QVERIFY(registryState.registeredSenders.isEmpty());
+        QCOMPARE(permissionStore.writes, 0);
+    }
+    void portalRestartRequiresIdentityRegistrationAgain() {
+        auto capture = backend(false);
+        QSignalSpy frames(capture.get(), &ICaptureBackend::captured);
+        capture->capture(CaptureMode::Region);
+        QTRY_COMPARE(frames.size(), 1);
+        auto bus = QDBusConnection::sessionBus();
+        QVERIFY(bus.unregisterService(portalService));
+        registryState.identities.clear();
+        QVERIFY(bus.registerService(portalService));
+        QTest::qWait(50);
+        capture->capture(CaptureMode::Region);
+        QTRY_COMPARE(frames.size(), 2);
+        QCOMPARE(registryState.registeredSenders.size(), 2);
+        QCOMPARE(registryState.registeredSenders.first(), registryState.registeredSenders.last());
+    }
     void screenshotPermissionDiagnostics_data() {
         QTest::addColumn<QString>("id");
         QTest::addColumn<QString>("decision");
         QTest::addColumn<QString>("message");
         QTest::newRow("app-denied") << "io.snapling.SnapLing" << "no" << "已记住";
-        QTest::newRow("unidentified-host-denied") << "" << "no" << "未识别主机应用";
-        QTest::newRow("app-allowed-service-failure") << "io.snapling.SnapLing" << "yes" << "未发现";
+        QTest::newRow("unidentified-host-denied") << "" << "no" << "不用于本次请求";
+        QTest::newRow("app-allowed-service-failure") << "io.snapling.SnapLing" << "yes" << "连接已注册";
     }
     void screenshotPermissionDiagnostics() {
         QFETCH(QString, id);

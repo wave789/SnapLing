@@ -17,6 +17,18 @@ HTTP 测试服务器仅作为 **测试替身**，生产代码通过 QNetworkAcce
 
 `portal_hotkey` 用私有 D-Bus 验证原生 QDBusObjectPath 会话解析、XDG keysym 格式、绑定成功检查、activation_token、旧会话隔离、取消/拒绝/关闭、空快捷键及请求超时。它不证明用户的物理快捷键已被 GNOME 允许。
 
+截图流程另外模拟按唯一连接名缓存身份的 Registry：先在 Qt 共享连接复现空身份的 `code=2`、无 URI，再验证专用连接的 Register/Screenshot 顺序、单播响应的接收连接、共用拒绝和其他应用权限保持不变、连接复用、注册失败后换新连接重试、取消/销毁、服务重启重新注册及旧接口兼容。
+
+还可用真实 xdg-desktop-portal 前端核对身份路由，需要系统 Python PyGObject 和 dbus-run-session：
+
+```bash
+/usr/bin/python3 tools/test-portal-identity.py --portal /usr/libexec/xdg-desktop-portal
+```
+
+工具会启动私有 D-Bus、独立 XDG 目录和真实 Portal 前端。权限库、Access 授权应答和 Screenshot 图像均来自测试替身；先验证空身份被记住的拒绝，再运行生产 WaylandCapture，断言授权请求与截图后端收到的 app ID 均为 io.snapling.SnapLing，返回图像且共用拒绝记录未改变。它不会连接用户的桌面总线或截取用户屏幕，也不代表 GNOME 后端/物理三屏已通过。Portal 可执行文件路径按发行版调整。
+
+用户目录安装验证包含带空格的临时前缀：使用真实 Gio.DesktopAppInfo 读取生成的 desktop 文件，并通过该入口以 `--version` 启动已安装程序，检查绝对 Exec 路径、引号和安装 manifest。不要只用文件是否存在代替桌面入口有效性检查。
+
 多屏用例提供内置屏、HDMI、DP 三路不同颜色和原生尺寸的帧，故意打乱 Portal 节点顺序。验证 100%/150%/200% 混合缩放、负原点、同分辨率屏幕映射、指定外接屏只读取对应节点、等待较慢外接屏、授权不足后通过主界面重新选择、三处覆盖层中选定外接屏并继续标注/高级编辑、Esc 关闭所有遮罩后重试、全屏拼接包含各屏像素、旧单屏 token 迁移、持续共享切换目标、布局变化及会话关闭。核心套件验证拼接坐标、透明空隙、原生像素与尺寸上限。这些是合成帧和私有 D-Bus 的回归测试，不能替代真实笔记本与两台外接显示器的验证。
 
 安装了 `xvfb-run` 和 `xdotool` 时，CTest 运行 `quick_edit`。外部目标进程提供实际窗口，生产 X11 热键和 XCB 后端捕获像素。xdotool 发送真实鼠标事件，验证悬停整屏、单击整屏、拖动区域和松开立即原地标注；另验证缺少 MouseMove 事件的快速框选。Qt 鼠标/键盘事件覆盖即时箭头和矩形、中英文 OCR 跨行选择与复制、选区内翻译显示、PNG/JPEG 保存，以及 Enter 后对象修改和撤销重做。另验证 OCR/翻译未结束时进入高级编辑器、翻译失败提示和取消截图。翻译响应由本地 HTTP 测试替身提供。在 150% 和 200% 下重跑整屏单击、鼠标框选、标注、OCR、高级编辑交接和译文保存。界面截图生成于 `build/quick-edit-ui.png`、`build/quick-edit-ui-150.png` 和 `build/quick-edit-ui-200.png`。

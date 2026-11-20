@@ -79,7 +79,11 @@ Wayland 默认请求非交互式 Screenshot，后台解码完整桌面，按 Qt 
 cmake --install build --prefix "$HOME/.local"
 ```
 
-退出旧进程后重新运行，点击「重新请求截图授权」，在系统询问时选择允许截图。启动日志的 `desktop_entry_installed=0` 表示尚未找到身份文件。若只存在未识别主机应用的拒绝记录，或重新授权后仍失败，请保留权限状态及系统 Portal 服务日志进一步排查，不自动清空共享权限或重启桌面服务。
+`desktop_entry_installed=1` 只说明身份文件存在，不代表截图连接已经注册成功。新版为单次截图建立独立 D-Bus 连接，先等待 `Register(io.snapling.SnapLing)` 成功，再在同一连接请求 Screenshot；正常会打印 `portal_identity=registered app_id=io.snapling.SnapLing connection=dedicated`。这样不会沿用 Qt 共享连接被缓存的“未识别应用”身份，也不需要修改那条共用拒绝记录。
+
+Linux 安装时 desktop 文件的 Exec 会写为安装目录中程序的绝对路径，避免用户目录安装后，Portal 的 PATH 中还没有 `~/.local/bin`，导致文件虽存在却不能被 GDesktopAppInfo 识别。升级后请重新执行上面的安装命令，更新身份文件和程序。
+
+退出旧进程后重新运行，按截图快捷键或点击「开始截图」，在系统询问时允许 SnapLing 截图。只有 SnapLing 自己保存了拒绝记录时，才需点击「重新请求截图授权」。不支持 Registry 的旧 Portal 明确打印 `portal_identity=legacy_unverified`，仍使用系统推断的身份；此时可从已安装的应用启动器运行。注册失败会显示原因并停止本次截图，不悄悄切回未识别身份或开启共享。仍有错误时请保留 `portal_identity`、权限状态及服务日志；程序不会自动清空共用权限或重启桌面服务。
 
 ## 离线 OCR
 

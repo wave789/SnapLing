@@ -1,0 +1,57 @@
+2026-11-20 / Debian 13 / Qt 6.8.2 / real xdg-desktop-portal frontend 1.20.3
+Private bus and XDG directories; Access/PermissionStore/Screenshot backend data are test substitutes.
+No GNOME UI or physical three-monitor claim.
+
+Complete CTest suite:
+[OUTPUT]
+Internal ctest changing into directory: /workspace/SnapLing/build
+
+[HANDLER_OUTPUT]
+Test project /workspace/SnapLing/build
+
+    Start 1: core
+1/7 Test #1: core .............................   Passed    2.79 sec
+    Start 2: translation_screenshot
+2/7 Test #2: translation_screenshot ...........   Passed    4.85 sec
+    Start 3: capture_flow
+3/7 Test #3: capture_flow .....................   Passed    9.86 sec
+    Start 4: portal_hotkey
+4/7 Test #4: portal_hotkey ....................   Passed    0.74 sec
+    Start 5: quick_edit
+5/7 Test #5: quick_edit .......................   Passed   62.55 sec
+    Start 6: quick_edit_scale_1.5
+6/7 Test #6: quick_edit_scale_1.5 .............   Passed   32.59 sec
+    Start 7: quick_edit_scale_2
+7/7 Test #7: quick_edit_scale_2 ...............   Passed   32.60 sec
+
+100% tests passed, 0 tests failed out of 7
+
+Total Test time (real) = 145.99 sec
+
+Focused capture flow:
+Totals: 51 passed, 0 failed, 1 skipped, 0 blacklisted, 9735ms
+
+No PipeWire build capture flow:
+Totals: 32 passed, 0 failed, 1 skipped, 0 blacklisted, 6662ms
+
+Real Portal frontend test:
+real_portal_anonymous_host_denied=PASS code=2
+********* Start testing of TestPortal *********
+Config: Using QtTest library 6.8.2, Qt 6.8.2 (x86_64-little_endian-lp64 shared (dynamic) release build; by GCC 14.2.0), debian 13
+PASS   : TestPortal::initTestCase()
+QINFO  : TestPortal::screenshotWithUserPermission() capture_backend=screenshot screens=1 target=-1
+QINFO  : TestPortal::screenshotWithUserPermission() portal_identity=registered app_id=io.snapling.SnapLing connection=dedicated
+QINFO  : TestPortal::screenshotWithUserPermission() portal_screenshot_response code=0 has_uri=1
+QINFO  : TestPortal::screenshotWithUserPermission() portal_screenshot_pixels=240x320 desktop=0,0,240x320
+QINFO  : TestPortal::screenshotWithUserPermission() portal_actual_image=240x320 permission_inclusive_ms=101
+PASS   : TestPortal::screenshotWithUserPermission()
+PASS   : TestPortal::cleanupTestCase()
+Totals: 3 passed, 0 failed, 0 skipped, 0 blacklisted, 109ms
+********* Finished testing of TestPortal *********
+real_portal_registered_app_scoped_dialog_and_capture=PASS
+real_portal_host_denial_unchanged=PASS
+
+Other verified checks:
+user_install_desktop_lookup_launch_file_mode_manifest=PASS
+desktop_destdir_runtime_prefix=PASS
+single_instance_command_roundtrip=PASS

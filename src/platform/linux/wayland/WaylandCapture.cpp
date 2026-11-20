@@ -1,5 +1,6 @@
 #include "WaylandCapture.h"
 #include "Portal.h"
+#include "PortalConnection.h"
 #include "settings/Settings.h"
 #ifdef SNAPLING_HAVE_PIPEWIRE
 #include "PipeWireStream.h"
@@ -125,7 +126,26 @@ void WaylandCapture::capture(CaptureMode, int screen) {
 }
 void WaylandCapture::portalCapture() {
     const auto job = generation;
-    request = new PortalRequest(this);
+    if (!screenshotConnection) {
+        screenshotConnection = std::make_unique<PortalConnection>(applicationId);
+        connect(screenshotConnection.get(), &PortalConnection::serviceRestarted, this, [this] {
+            if (capturePending && method == Method::Screenshot)
+                failSharing("系统截图服务已重启，请重新截图。");
+        });
+    }
+    screenshotConnection->ensureRegistered(this, [this, job](QString error) {
+        if (job != generation)
+            return;
+        if (!error.isEmpty()) {
+            failSharing(error);
+            return;
+        }
+        requestScreenshot();
+    });
+}
+void WaylandCapture::requestScreenshot() {
+    const auto job = generation;
+    request = new PortalRequest(screenshotConnection->bus(), this);
     request->call("org.freedesktop.portal.Screenshot", "Screenshot", {QString()},
                   {{"interactive", false}, {"modal", false}},
                   [this, job](uint code, QVariantMap data, QString error) {
@@ -258,8 +278,10 @@ void WaylandCapture::reportScreenshotFailure(QString error) {
         qInfo("screenshot_permission app=%s unidentified_host=%s", decision(own), decision(host));
         if (own.contains("no"))
             failSharing(error + "系统已记住对 SnapLing 截图权限的拒绝，不会再次弹窗。请点击“重新请求截图授权”，然后在系统弹窗中允许截图。");
-        else if (host.contains("no"))
+        else if (host.contains("no") && !screenshotConnection->hasRegisteredIdentity())
             failSharing(error + "系统对未识别主机应用保存了拒绝记录。需检查 SnapLing 的桌面安装和应用身份；不会自动修改其他应用共用的权限。请复制终端日志排查。");
+        else if (screenshotConnection->hasRegisteredIdentity())
+            failSharing(error + "本次截图连接已注册为 SnapLing，未发现 SnapLing 的已保存拒绝。请查看系统截图服务日志；未识别主机应用的拒绝记录不用于本次请求。");
         else
             failSharing(error + "未发现 SnapLing 或未识别主机应用的已保存拒绝记录。仍需检查实际应用身份及 xdg-desktop-portal、GNOME 截图服务日志；响应码 2 不能单独确定原因。");
     });

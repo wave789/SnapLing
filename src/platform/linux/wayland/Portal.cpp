@@ -8,13 +8,16 @@
 #include <QUuid>
 namespace SnapLing {
 static const QString service = "org.freedesktop.portal.Desktop", root = "/org/freedesktop/portal/desktop";
-PortalRequest::PortalRequest(QObject *parent, int responseTimeoutMs) : QObject(parent) {
+PortalRequest::PortalRequest(QObject *parent, int responseTimeoutMs)
+    : PortalRequest(QDBusConnection::sessionBus(), parent, responseTimeoutMs) {}
+PortalRequest::PortalRequest(const QDBusConnection &bus, QObject *parent, int responseTimeoutMs)
+    : QObject(parent), connection(bus) {
     timer.setSingleShot(true);
     timer.setInterval(qMax(1, responseTimeoutMs));
     connect(&timer, &QTimer::timeout, this, [this] {
         if (!path.isEmpty()) {
             auto message = QDBusMessage::createMethodCall(service, path, "org.freedesktop.portal.Request", "Close");
-            QDBusConnection::sessionBus().asyncCall(message);
+            connection.asyncCall(message);
         }
         finish(2, {}, "系统 Portal 响应超时，请检查系统授权窗口或重新尝试。");
     });
@@ -45,10 +48,10 @@ uint PortalRequest::version(const QString &iface) {
 void PortalRequest::call(QString iface, QString method, QVariantList args, QVariantMap options, Callback cb) {
     callback = std::move(cb);
     QString token = "snapling_" + QUuid::createUuid().toString(QUuid::Id128);
-    QString sender = QDBusConnection::sessionBus().baseService().mid(1).replace('.', '_');
+    QString sender = connection.baseService().mid(1).replace('.', '_');
     path = root + "/request/" + sender + "/" + token;
     options["handle_token"] = token;
-    auto bus = QDBusConnection::sessionBus();
+    auto bus = connection;
     bus.connect(service, path, "org.freedesktop.portal.Request", "Response", this,
                 SLOT(response(uint, QVariantMap)));
     auto message = QDBusMessage::createMethodCall(service, root, iface, method);
@@ -65,7 +68,7 @@ void PortalRequest::call(QString iface, QString method, QVariantList args, QVari
             return;
         }
         if (reply.value().path() != path) {
-            auto bus = QDBusConnection::sessionBus();
+            auto bus = connection;
             bus.disconnect(service, path, "org.freedesktop.portal.Request", "Response", this,
                            SLOT(response(uint, QVariantMap)));
             path = reply.value().path();
@@ -83,7 +86,7 @@ void PortalRequest::cancel() {
         return;
     if (!path.isEmpty()) {
         auto m = QDBusMessage::createMethodCall(service, path, "org.freedesktop.portal.Request", "Close");
-        QDBusConnection::sessionBus().asyncCall(m);
+        connection.asyncCall(m);
     }
     finish(1, {}, "请求已取消");
 }
@@ -92,7 +95,7 @@ void PortalRequest::finish(uint code, QVariantMap results, QString error) {
         return;
     done = true;
     timer.stop();
-    QDBusConnection::sessionBus().disconnect(service, path, "org.freedesktop.portal.Request", "Response",
+    connection.disconnect(service, path, "org.freedesktop.portal.Request", "Response",
                                              this, SLOT(response(uint, QVariantMap)));
     if (callback)
         callback(code, results, error);

@@ -20,12 +20,15 @@
 
 SnapLing 不请求 `interactive=true`，避免先在 Ubuntu 工具中框选、再进入 SnapLing 框选。拒绝权限时保留错误，不自动启动共享或系统框选。不同桌面/版本可能不提供完整桌面图像，因此设置中保留用户主动选择的兼容模式。
 
+应用身份按 D-Bus 唯一连接名缓存。只有 desktop 文件或 Qt 的 desktopFileName，不能证明实际截图连接已注册；共享连接若先被推断为空身份，再改名称也不会替换它。SnapLing 因此使用独立连接，第一条 Portal 方法调用为 `org.freedesktop.host.portal.Registry.Register("io.snapling.SnapLing", {})`，等待成功后在同一连接截图、接收结果和取消。成功会输出 `portal_identity=registered ... connection=dedicated`。未识别应用的拒绝仍保留，系统会单独判断 SnapLing 的授权；未设置时仍需用户在系统询问中批准。
+
 截图发生在系统处理请求的时刻，有 API、编码和解码延迟；首次授权期间不能保证捕获快捷键按下那一帧。保护视频也可能返回黑色画面。当前不支持跨多个输出连续拖动一个选区。
 
 上游依据（实现会随版本变化）：
 
 - [Screenshot Portal 接口](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.Screenshot.html)
 - [xdg-desktop-portal 1.20.3 的权限及后端转发](https://github.com/flatpak/xdg-desktop-portal/blob/1.20.3/src/screenshot.c)
+- [Host Registry 的注册入口](https://github.com/flatpak/xdg-desktop-portal/blob/1.20.3/src/registry.c)与[按连接缓存的应用身份](https://github.com/flatpak/xdg-desktop-portal/blob/1.20.3/src/xdp-app-info.c)
 - [GNOME 截图后端](https://github.com/GNOME/xdg-desktop-portal-gnome/blob/main/src/screenshotdialog.c)：`skip_dialog`、`maybe_show_screenshot`、`do_take_screenshot`
 - [GlobalShortcuts Portal 接口](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.GlobalShortcuts.html)：会话、preferred_trigger 和 activation_token
 - [QtWayland 激活处理](https://github.com/qt/qtwayland/blob/6.8/src/plugins/shellintegration/xdg-shell/qwaylandxdgshell.cpp)：`XDG_ACTIVATION_TOKEN`

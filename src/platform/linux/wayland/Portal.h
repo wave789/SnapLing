@@ -1,5 +1,6 @@
 #pragma once
 #include <QObject>
+#include <QDBusConnection>
 #include <QTimer>
 #include <QVariantMap>
 #include <functional>
@@ -10,6 +11,8 @@ class PortalRequest final : public QObject {
   public:
     using Callback = std::function<void(uint, QVariantMap, QString)>;
     explicit PortalRequest(QObject *parent = nullptr, int responseTimeoutMs = 120000);
+    explicit PortalRequest(const QDBusConnection &connection, QObject *parent = nullptr,
+                           int responseTimeoutMs = 120000);
     void call(QString interface, QString method, QVariantList args, QVariantMap options, Callback cb);
     void cancel();
     static uint version(const QString &interface);
@@ -24,5 +27,6 @@ class PortalRequest final : public QObject {
     Callback callback;
     QTimer timer;
     bool done = false;
+    QDBusConnection connection;
 };
 } // namespace SnapLing

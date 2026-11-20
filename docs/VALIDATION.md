@@ -201,3 +201,19 @@ ScreenCast 测试使用独立 D-Bus 会话的 Portal 替身和受控帧源，覆
 私有 D-Bus 测试覆盖已记住的拒绝、未识别主机拒绝、允许状态下的后端失败、从主界面重新请求后截图成功、其他应用及共享记录保持不变、权限写入被拒绝后不开始截图。测试服务提供权限库和截图响应，未在用户 GNOME 设备实际修改权限。
 
 Release 构建通过；截图流程 45 通过、1 个真实 Wayland 条件用例跳过；Portal 快捷键 7 通过。禁用 PipeWire 的独立构建及截图回归通过。用户目录安装路径在 `/tmp` 前缀执行安装并启动 `--version` 成功，主程序单实例命令往返通过。未将这些结果当作用户设备已恢复截图的证据。
+
+### 后续：专用截图连接的身份注册
+
+用户进一步反馈 `desktop_entry_installed=1`，但 `screenshot_permission app=unset unidentified_host=no`，仍返回 2。源码检查发现此前只设置 Qt 的 desktopFileName，没有保证实际截图连接完成 Host Registry 注册。上游按 D-Bus sender 缓存身份；共享连接一旦被推断为空身份，修改桌面名称或清理 SnapLing 条目并不能改变它。
+
+新增 PortalConnection：建立独立 D-Bus 连接，第一条发往 Desktop Portal 的调用为 Register(io.snapling.SnapLing)，等待回复后再在该连接发出 Screenshot。PortalRequest 的请求路径、响应监听和取消均使用注入的连接。成功注册可复用；服务重启会使注册失效，注册错误后的重试换新连接。取消、销毁和迟到回复由 generation 与上下文隔离；不支持 Registry 的旧服务明确标记 legacy_unverified，其他注册错误不自动匿名重试。
+
+Linux 安装生成绝对 Exec 路径，避免 `~/.local/bin` 未出现在 Portal 的 PATH 时，仅有 desktop 文件却无法被 GDesktopAppInfo 识别。通过真实 Gio.DesktopAppInfo 读取并启动带空格前缀中的已安装程序（--version），校验文件模式与 manifest；DESTDIR 安装校验 Exec 保留运行时 `/usr/bin/snapling`，不写入暂存目录。
+
+本轮实际结果：
+
+- 完整 7 组 CTest 全部通过；截图流程 51 通过、1 个真实 Wayland 条件用例跳过。包含用户同样的共用拒绝状态、专用连接顺序和单播响应、复用、失败后更换连接、取消/销毁、服务重启和旧服务兼容；三屏及指定外接屏用例保留共用拒绝不变。
+- 禁用 PipeWire 的独立构建与截图回归通过；主程序单实例命令往返通过。
+- **真实 xdg-desktop-portal 1.20.3 前端验证通过**：在私有 D-Bus 和 XDG 目录启动前端，测试权限库含空身份 no、SnapLing 未设置。匿名请求返回 2 且无授权请求；生产 WaylandCapture 注册后，前端向测试 Access 后端传递 io.snapling.SnapLing，并在模拟用户允许后，以同一 app ID 调用测试 Screenshot 后端、返回 240×320 PNG。共用 no 和其他应用权限保持不变。
+
+真实前端测试复现命令为 `/usr/bin/python3 tools/test-portal-identity.py --portal <xdg-desktop-portal路径>`。授权应答、权限库和图像来自明确的测试替身，未测试真实 GNOME 授权弹窗或用户物理三屏，也未修改用户桌面的权限。日志摘要见 [Portal 身份验证记录](validation/2026-11-20-portal-identity.txt)，本地完整回归日志为 `build/portal-identity-final-ctest.log`。

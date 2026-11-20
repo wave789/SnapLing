@@ -9,6 +9,7 @@
 - Windows：工作线程使用 GetDC / BitBlt / GetDIBits，原生资源由 RAII 释放。每个显示器查询物理矩形，再拼接到统一像素密度的逻辑桌面。窗口矩形来自 EnumWindows 与 DWM 扩展边界。当前窗口捕获是可见桌面裁切，没有 WGC 独立离屏窗口捕获。
 - X11：RandR 匹配显示器名称与物理坐标；独立 XCB 连接获取根窗口像素与窗口边界。窗口查询失败不会触发 Xlib 默认致命错误。高 DPI 和负逻辑原点映射由 CaptureFrame 统一处理。
 - Wayland 默认请求 Screenshot(interactive=false, modal=false)。工作线程检查本地 URI 图像尺寸、解码完整桌面，再以 QScreen 布局联合矩形和统一像素比例拆分各屏；不打开 ScreenCast 会话。长宽比或当前布局不匹配时报告错误，不自动打开系统框选或共享。未编译 PipeWire 时同样支持多屏。
+- 单次截图由 PortalConnection 持有独立 D-Bus 连接，第一条发往 Desktop Portal 的调用是 Host Registry.Register(io.snapling.SnapLing)。注册成功后才在同一连接发出 Screenshot。PortalRequest 可注入连接，Request 路径、Response 订阅和 Close 均使用该连接，避免混用 Qt 默认会话连接的身份。成功注册可复用；服务重启后重新注册，注册错误后的重试更换干净连接。旧 Portal 不支持 Registry 时明确标记 legacy_unverified，依靠系统启动身份；普通注册错误不会回退到匿名请求。取消与销毁通过 generation 和 QObject 上下文隔离迟到回调。热键和兼容 ScreenCast 继续使用原连接。
 - 设置中的 ScreenCast 兼容模式执行 CreateSession → SelectSources（multiple=true）→ Start，按元数据解析和过滤节点，为每一路独立调用 OpenPipeWireRemote。异步等待所需各屏首帧，在工作线程拼接后关闭临时共享。首帧等待上限 10 秒；每次仅复制第一帧，然后暂停流。
 - PortalRequest 在方法调用前订阅 Response，支持 Close、超时和旧路径兼容。运行时接口版本异步查询（2.5 秒），方法调用超时 5 秒，用户授权响应超时 120 秒；快捷键 CreateSession 单独限制 10 秒。PipeWire 流以 INACTIVE 创建，仅截图时激活，图像由 mutex 保护。保留的兼容后端会话也在空闲时暂停，下一次截图清除旧缓存重新取帧；正常 UI 不提供持续共享入口。
 - ScreenCast 的 position/size 与 Qt 屏幕布局匹配，必要时使用与 QScreen 名称相同的来源标识；只有单屏允许缺失元数据回退。多屏无法匹配或授权不全时明确报错。旧单屏 restore token 不复用，多屏 token 单独存储。兼容模式的「重置兼容截图授权」清除选择并开始新截图。显示器变化关闭旧流并清除选择；请求由 generation 隔离，Closed 检查当前会话路径。

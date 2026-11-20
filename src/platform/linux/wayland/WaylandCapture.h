@@ -8,6 +8,7 @@
 class QDBusMessage;
 namespace SnapLing {
 class PortalRequest;
+class PortalConnection;
 class PipeWireStream;
 class WaylandCapture final : public ICaptureBackend {
     Q_OBJECT
@@ -42,6 +43,7 @@ class WaylandCapture final : public ICaptureBackend {
 
   private:
     void portalCapture();
+    void requestScreenshot();
     void reportScreenshotFailure(QString error);
     void beginSharing(bool temporary);
     void resetSharing();
@@ -55,6 +57,7 @@ class WaylandCapture final : public ICaptureBackend {
     QVector<CaptureScreen> currentScreens() const;
     bool requestedSourcesAvailable();
     QPointer<PortalRequest> request;
+    std::unique_ptr<PortalConnection> screenshotConnection;
     QString session;
     bool active = false;
     bool starting = false, temporarySharing = false, capturePending = false;
