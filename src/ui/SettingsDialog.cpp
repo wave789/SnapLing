@@ -8,6 +8,8 @@
 #include <QDir>
 #include <QDoubleSpinBox>
 #include <QFileDialog>
+#include <QGuiApplication>
+#include <QCoreApplication>
 #include <QFormLayout>
 #include <QHBoxLayout>
 #include <QJsonArray>
@@ -43,6 +45,14 @@ SettingsDialog::SettingsDialog(Settings &s, ProviderConfig &runtime, QWidget *pa
     theme->addItems({"跟随系统", "浅色", "深色"});
     theme->setCurrentIndex(s.value("general/theme", 0).toInt());
     general->addRow("主题", theme);
+    auto *captureMethod = new QComboBox(this);
+    captureMethod->addItem("系统单次截图（默认，无持续共享）", "screenshot");
+    captureMethod->addItem("兼容截图（需要系统选择共享屏幕，取图后结束）", "screencast");
+    captureMethod->setCurrentIndex(qMax(0, captureMethod->findData(s.value("capture/waylandMethod", "screenshot"))));
+    if (QGuiApplication::platformName().contains("wayland") || qEnvironmentVariable("XDG_SESSION_TYPE") == "wayland")
+        general->addRow("截图方式", captureMethod);
+    else
+        captureMethod->hide();
     auto *startup = new QCheckBox("登录后自动启动");
     startup->setChecked(s.value("general/startup", false).toBool());
     general->addRow(startup);
@@ -82,8 +92,8 @@ SettingsDialog::SettingsDialog(Settings &s, ProviderConfig &runtime, QWidget *pa
         hotkeys->addRow(label + "（可留空）", edit);
     }
 
-    auto *hint = new QLabel("Wayland 快捷键由系统授权。系统不支持 Portal 时，在 GNOME 设置中绑定：\nsnapling "
-                            "--capture\nsnapling --full / --window / --ocr / --translate / --delay 3");
+    auto *hint = new QLabel("Wayland 快捷键由系统授权。若未成功注册，在 Ubuntu 设置 → 键盘 → 自定义快捷键中绑定：\n\"" +
+                            QCoreApplication::applicationFilePath() + "\" --capture\n主界面可复制此命令，也可重新注册快捷键。");
     hint->setWordWrap(true);
     hint->setTextInteractionFlags(Qt::TextSelectableByMouse);
     hotkeys->addRow(hint);
@@ -290,6 +300,7 @@ SettingsDialog::SettingsDialog(Settings &s, ProviderConfig &runtime, QWidget *pa
                 runtime = config();
                 s.saveProvider(runtime);
                 s.set("general/theme", theme->currentIndex());
+                s.set("capture/waylandMethod", captureMethod->currentData());
                 s.set("general/background", background->isChecked());
                 s.set("general/autoCopy", autoCopy->isChecked());
                 s.set("general/closeAfterCopy", closeCopy->isChecked());

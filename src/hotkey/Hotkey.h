@@ -11,6 +11,7 @@ class IHotkeyBackend : public QObject {
     virtual void bind(const QKeySequence &key) = 0;
     virtual void unbind() = 0;
   signals:
+    void activationTokenAvailable(QString token);
     void activated();
     void status(QString message, bool success);
 };

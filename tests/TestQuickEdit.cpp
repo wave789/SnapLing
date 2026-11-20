@@ -221,6 +221,26 @@ class TestQuickEdit : public QObject {
         QCOMPARE(overlay->session()->document.state().annotations.size(), 1);
         QVERIFY(windows<EditorWindow>().isEmpty());
     }
+    void nativeClickWholeMonitor() {
+        control({"windowfocus", targetWindow});
+        control({"key", "Escape"});
+        control({"key", "ctrl+alt+a"});
+        QTRY_COMPARE(windows<SelectionOverlay>().size(), 1);
+        overlay = windows<SelectionOverlay>().first();
+        const auto id = overlay->winId();
+        control({"mousemove", "100", "100"});
+        const auto expected = (QSizeF(overlay->size()) * overlay->devicePixelRatioF()).toSize();
+        QTRY_COMPARE(overlay->selection().size().toSize(), expected);
+        QVERIFY(!overlay->canvasWidget());
+        control({"click", "1"});
+        QTRY_COMPARE(overlay->phase(), SelectionOverlay::Phase::QuickEditing);
+        QCOMPARE(overlay->winId(), id);
+        QCOMPARE(overlay->session()->document.original().size(), expected);
+        QVERIFY(overlay->findChild<QFrame *>("quickToolbar")->isVisible());
+        draw("箭头", {60, 60}, {180, 180});
+        QCOMPARE(overlay->session()->document.state().annotations.size(), 1);
+        QVERIFY(windows<EditorWindow>().isEmpty());
+    }
     void instantOcr() {
         capture({20, 250, 760, 150});
         QVERIFY(overlay);

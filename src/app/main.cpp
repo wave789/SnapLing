@@ -40,14 +40,22 @@ int main(int argc, char **argv) {
     parser.setApplicationDescription("轻量截图、离线 OCR 与 AI 原地翻译");
     parser.addHelpOption();
     parser.addVersionOption();
-    for (QString name : {"capture", "full", "window", "ocr", "translate", "clipboard", "background", "quit"})
+    for (QString name : {"capture", "full", "window", "ocr", "translate", "clipboard", "background", "quit", "cancel-capture"})
         parser.addOption(QCommandLineOption(name, name));
+    QCommandLineOption activationOption("activation-token", "Wayland activation token", "token");
+    activationOption.setFlags(QCommandLineOption::HiddenFromHelp);
+    parser.addOption(activationOption);
     parser.addOption({"delay", "延时秒数", "seconds"});
     parser.addOption({"open", "打开图像或工程", "path"});
     parser.addOption({"exit-after", "自动退出，用于启动验证（毫秒）", "milliseconds"});
     parser.process(app);
+    auto arguments = app.arguments().mid(1);
+    const auto activationToken = qEnvironmentVariable("XDG_ACTIVATION_TOKEN");
+    if (!activationToken.isEmpty() && !arguments.contains("--activation-token"))
+        arguments << "--activation-token" << activationToken;
+    qunsetenv("XDG_ACTIVATION_TOKEN");
     SnapLing::SingleInstance instance;
-    auto result = instance.start(app.arguments().mid(1));
+    auto result = instance.start(arguments);
     if (result == SnapLing::SingleInstance::Result::Delivered)
         return 0;
     if (result == SnapLing::SingleInstance::Result::Error) {
@@ -57,7 +65,7 @@ int main(int argc, char **argv) {
     SnapLing::Application application;
     QObject::connect(&instance, &SnapLing::SingleInstance::command, &application,
                      &SnapLing::Application::command);
-    QTimer::singleShot(0, &application, [&] { application.command(app.arguments().mid(1)); });
+    QTimer::singleShot(0, &application, [&] { application.command(arguments); });
     if (parser.isSet("exit-after"))
         QTimer::singleShot(qMax(1, parser.value("exit-after").toInt()), &app, &QCoreApplication::quit);
     qInfo("startup_ms=%lld", startup.elapsed());

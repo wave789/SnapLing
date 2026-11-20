@@ -13,11 +13,13 @@ HTTP 测试服务器仅作为 **测试替身**，生产代码通过 QNetworkAcce
 
 `translation_screenshot` 重建深色/浅色菜单、后方文字、小字号路径，在 100%/150%/200% 像素比例下运行真实 Tesseract。验证窗口间文字分框、缩放和边距逆映射、路径/标题/同语言/低置信度过滤、字号范围、深浅底板对比色、文字框之外像素不变，以及 HTTP 翻译到 PNG 的完整链路。测试图由绘图代码生成，未使用用户原图；语义译文仍由测试服务器提供。产物为 `build/translation-menu-original.png` 和 `build/translation-menu-fixed.png`。
 
-安装了 `dbus-run-session` 时，CTest 运行截图流程回归测试。在独立 D-Bus 会话中提供 ScreenCast Portal 测试替身和受控帧源，调用实际应用入口，验证整屏首帧、区域/窗口/自定义形状进入 SnapLing 选区、松开鼠标在同一遮罩内显示工具栏、Enter 后共享文档进入高级编辑。覆盖首帧延迟、临时共享关闭、主动持续共享、授权拒绝/取消/重试、旧响应隔离、负原点坐标和畸形节点列表。关闭 PipeWire 的构建验证非交互式 Screenshot 及拒绝后报错。这些测试未经过真实 PipeWire 视频传输或 GNOME 授权。
+安装了 `dbus-run-session` 时，CTest 运行截图流程回归测试。在独立 D-Bus 会话中提供 Screenshot/ScreenCast 测试服务和受控帧源，调用实际应用入口。默认单次截图验证三屏完整 PNG 拆分、负坐标、混合缩放、指定外接屏、没有 ScreenCast 调用、拒绝后不自动共享、截图布局不匹配、取消后的迟到响应以及单击整屏/拖动区域后原地显示工具栏。关闭 PipeWire 后仍运行单次多屏用例。兼容模式验证首帧延迟、取图关闭、保留会话时空闲暂停、只激活目标屏幕、重新请求新帧、拒绝/取消/重试及畸形节点。这些服务测试不能替代真实 GNOME 权限和真实 PipeWire 视频传输。
+
+`portal_hotkey` 用私有 D-Bus 验证原生 QDBusObjectPath 会话解析、XDG keysym 格式、绑定成功检查、activation_token、旧会话隔离、取消/拒绝/关闭、空快捷键及请求超时。它不证明用户的物理快捷键已被 GNOME 允许。
 
 多屏用例提供内置屏、HDMI、DP 三路不同颜色和原生尺寸的帧，故意打乱 Portal 节点顺序。验证 100%/150%/200% 混合缩放、负原点、同分辨率屏幕映射、指定外接屏只读取对应节点、等待较慢外接屏、授权不足后通过主界面重新选择、三处覆盖层中选定外接屏并继续标注/高级编辑、Esc 关闭所有遮罩后重试、全屏拼接包含各屏像素、旧单屏 token 迁移、持续共享切换目标、布局变化及会话关闭。核心套件验证拼接坐标、透明空隙、原生像素与尺寸上限。这些是合成帧和私有 D-Bus 的回归测试，不能替代真实笔记本与两台外接显示器的验证。
 
-安装了 `xvfb-run` 和 `xdotool` 时，CTest 运行 `quick_edit`。外部目标进程提供实际窗口，生产 X11 热键和 XCB 后端捕获像素。xdotool 发送真实 X11 鼠标按下、移动、松开，确认工具栏在松开后属于原覆盖层，随后可画箭头；另验证缺少 MouseMove 事件的快速框选。Qt 鼠标/键盘事件覆盖即时箭头和矩形、中英文 OCR 跨行选择与复制、选区内翻译显示、PNG/JPEG 文件对话框保存与格式选择，以及 Enter 后对象修改和撤销重做。另验证 OCR/翻译未结束时进入高级编辑器、翻译失败的非阻塞提示和取消截图。翻译响应由本地 HTTP 测试替身提供。在 150% 和 200% 缩放下重跑真实鼠标框选、标注、OCR、高级编辑交接和译文保存。界面截图生成于 `build/quick-edit-ui.png`、`build/quick-edit-ui-150.png` 和 `build/quick-edit-ui-200.png`。
+安装了 `xvfb-run` 和 `xdotool` 时，CTest 运行 `quick_edit`。外部目标进程提供实际窗口，生产 X11 热键和 XCB 后端捕获像素。xdotool 发送真实鼠标事件，验证悬停整屏、单击整屏、拖动区域和松开立即原地标注；另验证缺少 MouseMove 事件的快速框选。Qt 鼠标/键盘事件覆盖即时箭头和矩形、中英文 OCR 跨行选择与复制、选区内翻译显示、PNG/JPEG 保存，以及 Enter 后对象修改和撤销重做。另验证 OCR/翻译未结束时进入高级编辑器、翻译失败提示和取消截图。翻译响应由本地 HTTP 测试替身提供。在 150% 和 200% 下重跑整屏单击、鼠标框选、标注、OCR、高级编辑交接和译文保存。界面截图生成于 `build/quick-edit-ui.png`、`build/quick-edit-ui-150.png` 和 `build/quick-edit-ui-200.png`。
 
 图标工具栏回归检查按钮图标、纯图标样式、提示、可访问名称和完整可见性，验证翻译按钮实际渲染的绿色像素、取消 OCR/网络任务后的原图与标注、忽略迟到响应、重新显示已完成图层不发出新请求，以及高级编辑器接管后的绿色状态。该流程也在 150%/200% 下执行。Xvfb 使用独立显示号，桌面套件由 CTest 串行执行以隔离共享宿主初始化，并保留 Xvfb 日志。
 
@@ -33,7 +35,16 @@ Wayland 测试必须在真实登录会话中主动运行：
 QT_QPA_PLATFORM=wayland build/snapling_portal_test
 ```
 
-读取实际接口版本，默认请求真实 ScreenCast/PipeWire 整屏首帧，未启用 PipeWire 时请求非交互式 Screenshot Portal。用户拒绝、权限失败或 10 秒内没有完成授权时，取消请求并明确标记 **SKIP**。普通截图取得首帧后关闭临时共享，测试结束还会取消未完成请求；测试不会保存用户桌面。
+读取实际接口版本，随后请求真实非交互式 Screenshot Portal。拒绝、权限失败或 10 秒内没有完成授权时，取消请求并明确标记 **SKIP**；测试不会保存用户桌面。
+
+在已有至少三个输出的 Weston/Wayland 会话中可运行覆盖层测试：
+
+```bash
+SNAPLING_TEST_WAYLAND=1 QT_QPA_PLATFORM=wayland dbus-run-session -- \
+  build/snapling_capture_flow_test waylandOutputsExposeFrozenOverlays
+```
+
+此用例使用真实 Wayland surface 和 QScreen，检查各窗口 isExposed、全屏尺寸、绿色边框和单击后即时工具栏。PNG 来自明确的测试服务。默认点击由 QtTest 发送；在 Weston X11 后端上，可设置 `SNAPLING_TEST_WAYLAND_X11_WINDOWS` 为按 QScreen 顺序排列的三个父窗口 ID，并提供对应 DISPLAY/XAUTHORITY，通过 xdotool → Weston seat → Wayland 的真实输入通道验证逐屏悬停、只有当前屏幕高亮、单击第三屏、再次截图后在第三屏拖选及像素尺寸。父窗口应按输出布局分开放置。Qt 的推算 screen() 属性可能变化，不能单独作为窗口实际放错屏的结论。此测试不验证 GNOME 的实际 Screenshot 授权或三屏视频。
 
 ## 人工验收矩阵
 
@@ -50,7 +61,7 @@ QT_QPA_PLATFORM=wayland build/snapling_portal_test
 
 ## 性能日志
 
-主程序输出 `startup_ms`、`capture_ms`、`trigger_to_pixels_ms`、`trigger_to_selection_ms`、`image_export_ms`、`ocr_ms`（含 cold）和 `translation_ms`；无正文或密钥。选区时间在首个 paint 结束记录。原生后端采集时间与外部授权时间不能混为一谈。
+主程序输出 `startup_ms`、`capture_backend`、`capture_ms`、`trigger_to_pixels_ms`、`trigger_to_selection_ms`、`hotkey_ready`、`image_export_ms`、`ocr_ms` 和 `translation_ms`；无正文、密钥或 activation token。选区时间在首个 paint 结束记录，包含屏幕名称；paint 本身不证明合成器显示了窗口，Wayland 专项测试另检查 isExposed。采集和外部授权耗时不能混为一谈。
 
 建议使用 `/usr/bin/time -v` 记录峰值，读取 `/proc/<pid>/status` 的 VmRSS 记录真正空闲时的工作集；Windows 可使用任务管理器/Process Explorer。OCR 冷热测量使用同一实例连续识别两次，单独记录模型加载。持续共享需另测缓存、吞吐与 CPU，不纳入默认后台数据。
 

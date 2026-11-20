@@ -9,10 +9,12 @@ class PortalRequest final : public QObject {
     Q_OBJECT
   public:
     using Callback = std::function<void(uint, QVariantMap, QString)>;
-    explicit PortalRequest(QObject *parent = nullptr);
+    explicit PortalRequest(QObject *parent = nullptr, int responseTimeoutMs = 120000);
     void call(QString interface, QString method, QVariantList args, QVariantMap options, Callback cb);
     void cancel();
     static uint version(const QString &interface);
+    static void queryVersion(const QString &interface, QObject *context,
+                             std::function<void(uint, QString)> callback);
   private slots:
     void response(uint code, const QVariantMap &results);
 

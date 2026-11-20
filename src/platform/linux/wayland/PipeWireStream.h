@@ -11,6 +11,7 @@ class PipeWireStream : public QObject {
     ~PipeWireStream() override;
     virtual bool start(int fd, uint node, const QString &serial, QString &error);
     virtual void stop();
+    virtual void setActive(bool active);
     virtual QImage latest() const;
   signals:
     void failed(QString error);

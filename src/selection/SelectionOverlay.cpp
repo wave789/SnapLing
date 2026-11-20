@@ -22,6 +22,8 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QScreen>
+#include <QStyleHints>
+#include <QWindow>
 #include <QWheelEvent>
 #include <QtMath>
 namespace SnapLing {
@@ -39,15 +41,18 @@ QImage maskedSelection(const QImage &source, const QPainterPath &path) {
     return result;
 }
 SelectionOverlay::SelectionOverlay(CaptureFrame f, CaptureMode m, QWidget *parent,
-                                   std::shared_ptr<EditorSession> session)
+                                   std::shared_ptr<EditorSession> session, QString activationToken, bool activate)
     : QWidget(parent), frame(std::move(f)), mode(m), editing(std::move(session)) {
     setAttribute(Qt::WA_DeleteOnClose);
     setWindowTitle("SnapLing · 即时截图编辑");
-    setWindowFlags(Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint | Qt::Tool);
+    const bool wayland = QGuiApplication::platformName().contains("wayland");
+    setWindowFlags(Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint | (wayland ? Qt::Window : Qt::Tool));
+    if (wayland)
+        setAttribute(Qt::WA_ShowWithoutActivating);
     setMouseTracking(true);
     setCursor(Qt::CrossCursor);
     setFocusPolicy(Qt::StrongFocus);
-    if (QGuiApplication::platformName().contains("wayland")) {
+    if (wayland) {
         QScreen *screen = nullptr;
         if (!frame.screenName.isEmpty())
             for (auto *candidate : QGuiApplication::screens())
@@ -61,16 +66,55 @@ SelectionOverlay::SelectionOverlay(CaptureFrame f, CaptureMode m, QWidget *paren
             screen = QGuiApplication::primaryScreen();
         setScreen(screen);
         setGeometry(screen->geometry());
-        showFullScreen();
     } else {
         setGeometry(frame.desktop.toAlignedRect());
-        show();
     }
-    activateWindow();
-    setFocus();
+    present(std::move(activationToken), activate);
     if (mode == CaptureMode::FullScreen || frame.selectionComplete) {
         selected = frame.image.rect();
         QTimer::singleShot(0, this, &SelectionOverlay::beginQuickEditing);
+    }
+}
+void SelectionOverlay::present(QString token, bool activate) {
+    // QtWayland 的 requestActivate 会消费此标准环境变量；只在当前激活请求期间传入。
+    const auto previous = qgetenv("XDG_ACTIVATION_TOKEN");
+    if (!token.isEmpty())
+        qputenv("XDG_ACTIVATION_TOKEN", token.toUtf8());
+    if (QGuiApplication::platformName().contains("wayland"))
+        showFullScreen();
+    else
+        show();
+    if (activate) {
+        if (QGuiApplication::platformName().contains("wayland")) {
+            if (windowHandle())
+                windowHandle()->requestActivate();
+        } else {
+            raise();
+            activateWindow();
+        }
+        setFocus();
+    }
+    if (!token.isEmpty()) {
+        if (previous.isNull())
+            qunsetenv("XDG_ACTIVATION_TOKEN");
+        else
+            qputenv("XDG_ACTIVATION_TOKEN", previous);
+    }
+}
+void SelectionOverlay::enterEvent(QEnterEvent *) {
+    if (currentPhase == Phase::Selecting && !dragging &&
+        (mode == CaptureMode::Region || (mode == CaptureMode::Window && frame.windows.isEmpty()))) {
+        selected = frame.image.rect();
+        hoverSelection = true;
+        update();
+    }
+}
+void SelectionOverlay::leaveEvent(QEvent *) {
+    if (currentPhase == Phase::Selecting && hoverSelection && !dragging) {
+        selected = {};
+        hoverSelection = false;
+        cursor = {};
+        update();
     }
 }
 SelectionOverlay::~SelectionOverlay() {
@@ -131,9 +175,13 @@ void SelectionOverlay::paintEvent(QPaintEvent *) {
     painter.restore();
     painter.setPen(QPen(QColor("#0bd18b"), 2));
     const auto selection = selectionGeometry();
-    painter.drawRect(QRectF(selection).adjusted(-1, -1, 1, 1));
+    if (!selected.isEmpty()) {
+        const auto border = QRectF(selection).adjusted(-1, -1, 1, 1)
+                                .intersected(QRectF(rect()).adjusted(1, 1, -1, -1));
+        painter.drawRect(border);
+    }
     if (currentPhase == Phase::Selecting) {
-        const QString hint = QString("%1 × %2 · 拖动框选后立即编辑 · Enter 高级编辑 · Esc 取消")
+        const QString hint = QString("%1 × %2 · 单击选整屏，拖动选区域 · 松开立即编辑 · Esc 取消")
                                  .arg(qRound(selected.width())).arg(qRound(selected.height()));
         QRect label(12, 12, qMax(1, qMin(width() - 24, 760)), 32);
         painter.fillRect(label, QColor(20, 25, 35, 235));
@@ -164,7 +212,10 @@ void SelectionOverlay::mousePressEvent(QMouseEvent *e) {
     }
     if (currentPhase != Phase::Selecting)
         return;
+    if (e->button() != Qt::LeftButton)
+        return;
     cursor = e->position();
+    pressPosition = e->position();
     anchor = imagePoint(e->position());
     if (mode == CaptureMode::Polygon) {
         points << anchor;
@@ -172,10 +223,14 @@ void SelectionOverlay::mousePressEvent(QMouseEvent *e) {
         update();
         return;
     }
+    if (selected.isEmpty() && (mode == CaptureMode::Region || mode == CaptureMode::Window)) {
+        selected = frame.image.rect();
+        hoverSelection = true;
+    }
     startRect = selected;
-    resizing = !selected.isEmpty() &&
+    resizing = !hoverSelection && !selected.isEmpty() &&
                QLineF(anchor, selected.bottomRight()).length() < 16. * frame.image.width() / width();
-    moving = !resizing && selected.contains(anchor) && mode != CaptureMode::Freehand;
+    moving = !hoverSelection && !resizing && selected.contains(anchor) && mode != CaptureMode::Freehand;
     dragging = true;
     if (mode == CaptureMode::Freehand) {
         points.clear();
@@ -192,6 +247,9 @@ void SelectionOverlay::mouseMoveEvent(QMouseEvent *e) {
     auto point = imagePoint(e->position());
     if (dragging) {
         updateDrag(point, e->modifiers());
+    } else if (mode == CaptureMode::Region || (mode == CaptureMode::Window && frame.windows.isEmpty())) {
+        selected = frame.image.rect();
+        hoverSelection = true;
     } else if (mode == CaptureMode::Window) {
         for (auto w : frame.windows) {
             auto global = QPointF(frame.desktop.x() + e->position().x() * frame.desktop.width() / width(),
@@ -233,8 +291,12 @@ void SelectionOverlay::updateDrag(QPointF point, Qt::KeyboardModifiers modifiers
 void SelectionOverlay::mouseReleaseEvent(QMouseEvent *event) {
     if (currentPhase != Phase::Selecting || event->button() != Qt::LeftButton)
         return;
-    if (dragging)
+    if (dragging && hoverSelection &&
+        QLineF(pressPosition, event->position()).length() < QGuiApplication::styleHints()->startDragDistance())
+        selected = startRect;
+    else if (dragging)
         updateDrag(imagePoint(event->position()), event->modifiers());
+    hoverSelection = false;
     dragging = false;
     moving = false;
     resizing = false;

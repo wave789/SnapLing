@@ -11,14 +11,11 @@ class TestPortal : public QObject {
              hotkey = PortalRequest::version("org.freedesktop.portal.GlobalShortcuts");
         qInfo("actual_portals screenshot=%u screencast=%u globalshortcuts=%u", screenshot, screencast,
               hotkey);
-#ifdef SNAPLING_HAVE_PIPEWIRE
-        QVERIFY(screencast > 0);
-#else
         QVERIFY(screenshot > 0);
-#endif
     }
     void screenshotWithUserPermission() {
         WaylandCapture backend;
+        backend.setMethod(WaylandCapture::Method::Screenshot);
         QSignalSpy done(&backend, &ICaptureBackend::captured), errors(&backend, &ICaptureBackend::failed);
         backend.capture(CaptureMode::FullScreen);
         QElapsedTimer elapsed;

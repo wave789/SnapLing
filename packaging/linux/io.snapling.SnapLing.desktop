@@ -6,7 +6,7 @@ Exec=snapling
 Icon=snapling
 Categories=Graphics;Utility;
 Terminal=false
-StartupNotify=false
+StartupNotify=true
 Actions=Capture;OCR;
 [Desktop Action Capture]
 Name=截图

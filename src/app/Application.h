@@ -41,7 +41,7 @@ class Application final : public QObject {
     void settingsDialog();
     void historyDialog();
     void applyTheme();
-    void sharing();
+    void cancelCapture();
     void bindHotkeys();
     Settings settings;
     ProviderConfig config;
@@ -50,7 +50,8 @@ class Application final : public QObject {
     std::vector<std::unique_ptr<IHotkeyBackend>> extraHotkeys;
     QMainWindow main;
     QComboBox *modeBox, *screenBox;
-    QLabel *status, *sharingLabel;
+    QLabel *status, *hotkeyStatus;
+    QString captureActivationToken;
     QPointer<QProgressDialog> countdown;
     QSystemTrayIcon tray;
     CaptureMode pendingMode = CaptureMode::Region;

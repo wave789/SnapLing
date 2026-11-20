@@ -15,7 +15,7 @@ struct PipeWireStream::Impl {
     spa_video_info_raw info{};
     mutable QMutex mutex;
     QImage frame;
-    bool streaming = false;
+    bool wanted = false;
     static void format(void *p, uint32_t id, const spa_pod *param) {
         auto *d = static_cast<Impl *>(p);
         if (param && id == SPA_PARAM_Format)
@@ -25,8 +25,7 @@ struct PipeWireStream::Impl {
         auto *d = static_cast<Impl *>(p);
         {
             QMutexLocker lock(&d->mutex);
-            d->streaming = state == PW_STREAM_STATE_STREAMING;
-            if (!d->streaming)
+            if (state == PW_STREAM_STATE_ERROR || state == PW_STREAM_STATE_UNCONNECTED)
                 d->frame = {};
         }
         if (state == PW_STREAM_STATE_ERROR) {
@@ -54,8 +53,9 @@ struct PipeWireStream::Impl {
                 stride >= w * 4 && offset + quint64(stride) * quint64(h) <= v.maxsize) {
                 QImage image(static_cast<const uchar *>(v.data) + offset, w, h, stride, f);
                 QMutexLocker lock(&d->mutex);
-                d->frame = image.copy();
-                // 保留当前流的一帧，静止桌面的有效画面可直接用于下一次截图。
+                // 每次截图仅复制第一帧，GUI 线程随后暂停流。视频桌面也不会不断 memcpy。
+                if (d->wanted && d->frame.isNull())
+                    d->frame = image.copy();
             }
         }
         pw_stream_queue_buffer(d->stream, b);
@@ -119,7 +119,7 @@ bool PipeWireStream::start(int fd, uint node, const QString &serial, QString &er
                                SPA_VIDEO_FORMAT_RGBA)));
     int result = pw_stream_connect(
         d.stream, PW_DIRECTION_INPUT, serial.isEmpty() ? node : PW_ID_ANY,
-        static_cast<pw_stream_flags>(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS), &param, 1);
+        static_cast<pw_stream_flags>(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS | PW_STREAM_FLAG_INACTIVE), &param, 1);
     if (result < 0 || pw_thread_loop_start(d.loop) < 0) {
         error = "PipeWire 视频流启动失败";
         stop();
@@ -150,12 +150,24 @@ void PipeWireStream::stop() {
     }
     QMutexLocker lock(&d.mutex);
     d.frame = {};
-    d.streaming = false;
+    d.wanted = false;
+}
+void PipeWireStream::setActive(bool active) {
+    auto &d = *impl;
+    if (!d.loop || !d.stream)
+        return;
+    pw_thread_loop_lock(d.loop);
+    {
+        QMutexLocker lock(&d.mutex);
+        d.wanted = active;
+        if (active)
+            d.frame = {};
+    }
+    pw_stream_set_active(d.stream, active);
+    pw_thread_loop_unlock(d.loop);
 }
 QImage PipeWireStream::latest() const {
     QMutexLocker lock(&impl->mutex);
-    if (!impl->streaming)
-        return {};
     return impl->frame;
 }
 } // namespace SnapLing

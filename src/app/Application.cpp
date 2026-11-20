@@ -11,6 +11,7 @@
 #include <QApplication>
 #include <QClipboard>
 #include <QCloseEvent>
+#include <QCursor>
 #include <QDateTime>
 #include <QDialogButtonBox>
 #include <QFile>
@@ -27,6 +28,7 @@
 #include <QThreadPool>
 #include <QTimer>
 #include <QVBoxLayout>
+#include <QWindow>
 namespace SnapLing {
 Application::Application(QObject *p, std::unique_ptr<ICaptureBackend> captureBackend)
     : QObject(p), config(settings.provider()),
@@ -120,36 +122,47 @@ Application::Application(QObject *p, std::unique_ptr<ICaptureBackend> captureBac
     status->setWordWrap(true);
     status->setTextInteractionFlags(Qt::TextSelectableByMouse);
     layout->addWidget(status);
+    hotkeyStatus = new QLabel;
+    hotkeyStatus->setWordWrap(true);
+    hotkeyStatus->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    hotkeyStatus->setObjectName("hotkeyStatus");
+    layout->addWidget(hotkeyStatus);
+    auto *hotkeyButtons = new QHBoxLayout;
+    auto *retryHotkey = new QPushButton("重新注册快捷键");
+    hotkeyButtons->addWidget(retryHotkey);
+    connect(retryHotkey, &QPushButton::clicked, this, &Application::bindHotkeys);
+    auto *copyCommand = new QPushButton("复制系统快捷键命令");
+    hotkeyButtons->addWidget(copyCommand);
+    const bool waylandSession = QGuiApplication::platformName().contains("wayland") ||
+                                qEnvironmentVariable("XDG_SESSION_TYPE") == "wayland";
+    copyCommand->setVisible(waylandSession);
+    retryHotkey->setVisible(waylandSession);
+    connect(copyCommand, &QPushButton::clicked, this, [this] {
+        QString path = QCoreApplication::applicationFilePath();
+        path.replace('"', "\\\"");
+        QApplication::clipboard()->setText("\"" + path + "\" --capture");
+        hotkeyStatus->setText("命令已复制。在 Ubuntu 设置 → 键盘 → 自定义快捷键中粘贴并绑定 Ctrl+Alt+A。");
+    });
+    layout->addLayout(hotkeyButtons);
     auto *capabilities = new QLabel(platformDescription() + backend->name());
     capabilities->setWordWrap(true);
     capabilities->setTextInteractionFlags(Qt::TextSelectableByMouse);
     layout->addWidget(capabilities);
-    sharingLabel = new QLabel;
-    sharingLabel->setWordWrap(true);
-    layout->addWidget(sharingLabel);
 #ifndef Q_OS_WIN
     if (auto *wayland = qobject_cast<WaylandCapture *>(backend.get())) {
         capabilities->setText(capabilities->text() + "\n" + wayland->capabilities());
-        auto *share = new QPushButton("开启 / 停止授权快速截图");
-        auto *sharingButtons = new QHBoxLayout;
-        sharingButtons->addWidget(share);
-        auto *reselect = new QPushButton("重新选择共享屏幕…");
-        reselect->setToolTip("重新授权需要截图的内置和外接屏幕；选择整个桌面时请勾选全部显示器。");
-        sharingButtons->addWidget(reselect);
-        layout->addLayout(sharingButtons);
-        connect(share, &QPushButton::clicked, this, &Application::sharing);
+        auto *reselect = new QPushButton("重置兼容截图授权");
+        reselect->setObjectName("resetCompatibilityCapture");
+        reselect->setVisible(settings.value("capture/waylandMethod", "screenshot").toString() == "screencast");
+        layout->addWidget(reselect);
         connect(reselect, &QPushButton::clicked, this, [this, wayland] {
             if (capturing || preparing || countdown) {
-                status->setText("请先完成或取消当前截图，再重新选择共享屏幕。");
+                status->setText("请先完成或取消当前截图。");
                 return;
             }
             wayland->resetScreenSelection();
-            sharingLabel->setText("请在系统授权窗口勾选需要的内置和外接屏幕。");
+            status->setText("兼容模式：请在系统授权窗口选择需要截图的显示器。");
             capture(CaptureMode(modeBox->currentIndex()));
-        });
-        connect(wayland, &WaylandCapture::sharingChanged, this, [this](bool active) {
-            sharingLabel->setText(active ? "● 正在共享已授权屏幕，各缓存最新一帧。可停止共享或重新选择屏幕。"
-                                         : "屏幕共享已停止");
         });
     }
 #endif
@@ -167,7 +180,8 @@ Application::Application(QObject *p, std::unique_ptr<ICaptureBackend> captureBac
             show();
             return;
         }
-        qInfo("capture_ms=%lld trigger_to_pixels_ms=%lld", frame.captureMs, captureTimer.elapsed());
+        qInfo("capture_ms=%lld trigger_to_pixels_ms=%lld screens=%lld", frame.captureMs,
+              captureTimer.elapsed(), qlonglong(frame.screens.size()));
         if (pendingMode == CaptureMode::Window && !backend->hasWindowPicking())
             status->setText("在 SnapLing 选区中框选窗口内容，松开鼠标后即可标注。");
         showCaptureOverlays(std::move(frame));
@@ -184,13 +198,19 @@ Application::Application(QObject *p, std::unique_ptr<ICaptureBackend> captureBac
         show();
     });
     connect(hotkey.get(), &IHotkeyBackend::activated, this, [this] { capture(); });
+    connect(hotkey.get(), &IHotkeyBackend::activationTokenAvailable, this,
+            [this](QString token) { captureActivationToken = std::move(token); });
     connect(hotkey.get(), &IHotkeyBackend::status, this,
-            [this](QString message, bool) { status->setText(message); });
+            [this](QString message, bool ok) {
+                hotkeyStatus->setText(message);
+                qInfo("hotkey_ready=%d status=%s", ok, qPrintable(message));
+            });
     if (QSystemTrayIcon::isSystemTrayAvailable()) {
         tray.setIcon(QIcon(":/snapling.svg"));
         tray.setToolTip("SnapLing");
         auto *menu = new QMenu(&main);
         menu->addAction("截图", this, [this] { capture(); });
+        menu->addAction("取消截图", this, &Application::cancelCapture);
         menu->addAction("打开 SnapLing", this, [this] { show(); });
         menu->addAction("设置", this, [this] { settingsDialog(); });
         menu->addAction("退出", qApp, &QCoreApplication::quit);
@@ -224,7 +244,9 @@ void Application::bindHotkeys() {
         if (key.isEmpty())
             continue;
         auto h = createHotkeyBackend();
-        connect(h.get(), &IHotkeyBackend::status, this, [this](QString m, bool) { status->setText(m); });
+        connect(h.get(), &IHotkeyBackend::status, this, [this](QString m, bool) { hotkeyStatus->setText(m); });
+        connect(h.get(), &IHotkeyBackend::activationTokenAvailable, this,
+                [this](QString token) { captureActivationToken = std::move(token); });
         connect(h.get(), &IHotkeyBackend::activated, this, [this, i] {
             capture(i == 0   ? CaptureMode::FullScreen
                     : i == 1 ? CaptureMode::Window
@@ -251,8 +273,20 @@ bool Application::eventFilter(QObject *o, QEvent *e) {
     return QObject::eventFilter(o, e);
 }
 void Application::capture(CaptureMode mode, bool ocr, bool translate, int delay) {
-    if (capturing || countdown || preparing)
+    if (capturing || countdown || preparing) {
+        if (!captureOverlays.isEmpty()) {
+            for (qsizetype i = 0; i < captureOverlays.size(); ++i) {
+                auto overlay = captureOverlays[i];
+                if (overlay) {
+                    const bool activate = i == captureOverlays.size() - 1;
+                    overlay->present(activate ? captureActivationToken : QString(), activate);
+                }
+            }
+            captureActivationToken.clear();
+        } else
+            hotkeyStatus->setText("正在获取桌面，请完成系统授权。可从托盘取消截图后重试。");
         return;
+    }
     int editors = 0;
     for (auto *w : QApplication::topLevelWidgets())
         if (qobject_cast<EditorWindow *>(w))
@@ -363,14 +397,26 @@ void Application::showCaptureOverlays(CaptureFrame frame) {
             if (!found) {
                 capturing = false;
                 restoreWindows();
-                status->setText("无法匹配截图所在显示器，请检查屏幕连接并重新选择共享屏幕。");
+                status->setText("无法匹配截图所在显示器，请检查屏幕连接并重新截图。");
                 show();
                 return;
             }
         }
-    for (auto &view : views) {
+    // 全屏窗口各自保留目标输出，只有一个窗口请求键盘焦点；不能让各屏反复争抢激活。
+    if (auto *pointerScreen = QGuiApplication::screenAt(QCursor::pos()))
+        for (qsizetype i = 0; i < views.size(); ++i)
+            if (views[i].screenName == pointerScreen->name()) {
+                views.move(i, views.size() - 1);
+                break;
+            }
+    for (qsizetype index = 0; index < views.size(); ++index) {
+        auto &view = views[index];
         auto session = std::make_shared<EditorSession>(QImage(), settings, config);
-        auto *overlay = new SelectionOverlay(std::move(view), pendingMode, nullptr, session);
+        const bool activate = index == views.size() - 1;
+        const auto token = activate ? captureActivationToken : QString();
+        if (activate)
+            captureActivationToken.clear();
+        auto *overlay = new SelectionOverlay(std::move(view), pendingMode, nullptr, session, token, activate);
         captureOverlays << overlay;
         connect(overlay, &SelectionOverlay::advancedRequested, this, [this, overlay](auto session) {
             closeCaptureOverlays(overlay);
@@ -390,11 +436,22 @@ void Application::showCaptureOverlays(CaptureFrame frame) {
             capturing = false;
             restoreWindows();
         });
-        connect(overlay, &SelectionOverlay::ready, this,
-                [this] { qInfo("trigger_to_selection_ms=%lld", captureTimer.elapsed()); });
+        connect(overlay, &SelectionOverlay::ready, this, [this, overlay] {
+            qInfo("trigger_to_selection_ms=%lld screen=%s", captureTimer.elapsed(), qPrintable(overlay->captureScreenName()));
+            QTimer::singleShot(250, overlay, [overlay] {
+                auto *window = overlay->windowHandle();
+                qInfo("overlay_exposed=%d active=%d target=%s output=%s size=%dx%d",
+                      window && window->isExposed(), window && window->isActive(),
+                      qPrintable(overlay->captureScreenName()),
+                      window && window->screen() ? qPrintable(window->screen()->name()) : "",
+                      overlay->width(), overlay->height());
+            });
+        });
     }
 }
 void Application::beginCapture() {
+    if (!preparing)
+        return;
     preparing = false;
     if (capturing)
         return;
@@ -445,6 +502,15 @@ void Application::settingsDialog() {
     if (dialog.exec() == QDialog::Accepted) {
         applyTheme();
         bindHotkeys();
+#ifndef Q_OS_WIN
+        if (auto *wayland = qobject_cast<WaylandCapture *>(backend.get())) {
+            const bool compatibility = settings.value("capture/waylandMethod", "screenshot").toString() == "screencast";
+            cancelCapture();
+            wayland->setMethod(compatibility ? WaylandCapture::Method::ScreenCast : WaylandCapture::Method::Screenshot);
+            if (auto *button = main.findChild<QPushButton *>("resetCompatibilityCapture"))
+                button->setVisible(compatibility);
+        }
+#endif
     }
 }
 void Application::applyTheme() {
@@ -462,21 +528,18 @@ void Application::applyTheme() {
     else
         qApp->setStyleSheet("");
 }
-void Application::sharing() {
-#ifndef Q_OS_WIN
-    if (auto *b = qobject_cast<WaylandCapture *>(backend.get())) {
-        if (b->sharing())
-            b->stopSharing();
-        else if (QMessageBox::question(&main, "授权快速截图",
-                                       "开启后系统将持续共享所选屏幕。SnapLing "
-                                       "仅缓存最新一帧，不录制、不保存屏幕流。可以随时停止。是否继续？",
-                                       QMessageBox::Yes | QMessageBox::No,
-                                       QMessageBox::No) == QMessageBox::Yes) {
-            sharingLabel->setText("正在等待系统屏幕共享授权…");
-            b->startSharing();
-        }
+void Application::cancelCapture() {
+    preparing = false;
+    capturing = false;
+    captureActivationToken.clear();
+    if (countdown) {
+        countdown->hide();
+        countdown->deleteLater();
+        countdown = nullptr;
     }
-#endif
+    backend->cancel();
+    closeCaptureOverlays();
+    restoreWindows();
 }
 void Application::historyDialog() {
     QDialog dialog(&main);
@@ -557,6 +620,12 @@ void Application::command(QStringList args) {
         int i = args.indexOf(option);
         return i >= 0 && i + 1 < args.size() ? args[i + 1] : QString();
     };
+    captureActivationToken = value("--activation-token");
+    if (args.contains("--cancel-capture")) {
+        cancelCapture();
+        show();
+        return;
+    }
     if (args.contains("--open")) {
         open(value("--open"));
         return;

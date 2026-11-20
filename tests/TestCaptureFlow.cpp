@@ -16,6 +16,9 @@
 #include <QDBusUnixFileDescriptor>
 #include <QFrame>
 #include <QClipboard>
+#include <QPainter>
+#include <QProcess>
+#include <QWindow>
 #include <QToolButton>
 #include <QPushButton>
 #include <QScreen>
@@ -89,11 +92,12 @@ class ScreenshotPortal : public QObject {
     uint version() const { return 2; }
     QString uri;
     uint code = 0;
+    int delay = 0;
     QList<bool> requests;
   public slots:
     QDBusObjectPath Screenshot(const QString &, const QVariantMap &options) {
         requests << options["interactive"].toBool();
-        return respond(this, options, code, {{"uri", uri}});
+        return respond(this, options, code, {{"uri", uri}}, delay);
     }
 };
 class ScreenCastPortal : public QDBusAbstractAdaptor {
@@ -150,6 +154,8 @@ struct StreamControl {
     QHash<uint, QImage> frames;
     QList<uint> startedNodes;
     int started = 0, stopped = 0;
+    QSet<uint> activeNodes;
+    QList<uint> requestedNodes;
     bool descriptorValid = true;
 };
 class TestStream : public PipeWireStream {
@@ -164,6 +170,13 @@ class TestStream : public PipeWireStream {
         return true;
     }
     void stop() override { ++control->stopped; }
+    void setActive(bool active) override {
+        if (active) {
+            control->activeNodes.insert(node);
+            control->requestedNodes << node;
+        } else
+            control->activeNodes.remove(node);
+    }
     QImage latest() const override { return control->frames.contains(node) ? control->frames.value(node) : control->frame; }
   private:
     std::shared_ptr<StreamControl> control;
@@ -207,12 +220,15 @@ class TestCaptureFlow : public QObject {
                 result << window;
         return result;
     }
-    std::unique_ptr<WaylandCapture> backend() {
+    std::unique_ptr<WaylandCapture> backend(bool compatibility = true) {
 #ifdef SNAPLING_HAVE_PIPEWIRE
-        return std::make_unique<WaylandCapture>(nullptr, [state = control] {
+        auto result = std::make_unique<WaylandCapture>(nullptr, [state = control] {
             return std::make_unique<TestStream>(state);
         }, [this] { return testLayout; });
+        result->setMethod(compatibility ? WaylandCapture::Method::ScreenCast : WaylandCapture::Method::Screenshot);
+        return result;
 #else
+        Q_UNUSED(compatibility)
         return std::make_unique<WaylandCapture>(nullptr, WaylandCapture::StreamFactory{}, [this] { return testLayout; });
 #endif
     }
@@ -240,6 +256,8 @@ class TestCaptureFlow : public QObject {
     void init() {
         screenshot.requests.clear();
         screenshot.code = 0;
+        screenshot.delay = 0;
+        screenshot.uri = QUrl::fromLocalFile(images.filePath("desktop.png")).toString();
         screenCast.created = screenCast.closed = screenCast.started = screenCast.opened = 0;
         screenCast.startCode = 0;
         screenCast.startDelay = 0;
@@ -416,7 +434,7 @@ class TestCaptureFlow : public QObject {
         screenCast.nodeList = all;
         bool clicked = false;
         for (auto *button : main->findChildren<QPushButton *>())
-            if (button->text() == "重新选择共享屏幕…") {
+            if (button->objectName() == "resetCompatibilityCapture") {
                 button->click();
                 clicked = true;
                 break;
@@ -444,13 +462,17 @@ class TestCaptureFlow : public QObject {
         auto capture = backend();
         capture->startSharing();
         QTRY_VERIFY(capture->sharing());
+        QVERIFY(control->activeNodes.isEmpty());
         QSignalSpy frames(capture.get(), &ICaptureBackend::captured);
         for (int screen : {1, 2}) {
+            control->requestedNodes.clear();
             capture->capture(CaptureMode::Region, screen);
             QTRY_COMPARE(frames.size(), screen);
             const auto frame = qvariant_cast<CaptureFrame>(frames.last().first());
             QCOMPARE(frame.image, control->frames.value(uint(37 + screen)));
             QVERIFY(capture->sharing());
+            QVERIFY(control->activeNodes.isEmpty());
+            QCOMPARE(control->requestedNodes, QList<uint>{uint(37 + screen)});
         }
         capture->capture(CaptureMode::Region);
         QTRY_COMPARE(frames.size(), 3);
@@ -658,9 +680,17 @@ class TestCaptureFlow : public QObject {
         capture->capture(CaptureMode::Region);
         QTRY_COMPARE(frames.size(), 1);
         QVERIFY(capture->sharing());
+        QVERIFY(control->activeNodes.isEmpty());
         QCOMPARE(control->stopped, 0);
+        QVERIFY(control->activeNodes.isEmpty());
+        const auto first = qvariant_cast<CaptureFrame>(frames.first().first()).image;
+        control->frame = image.copy();
+        control->frame.fill(Qt::red);
         capture->capture(CaptureMode::Region);
         QTRY_COMPARE(frames.size(), 2);
+        QCOMPARE(qvariant_cast<CaptureFrame>(frames.last().first()).image.pixelColor(10, 10), QColor(Qt::red));
+        QVERIFY(qvariant_cast<CaptureFrame>(frames.last().first()).image != first);
+        QVERIFY(control->activeNodes.isEmpty());
         QCOMPARE(screenCast.created, 1);
         capture->stopSharing();
         QTRY_COMPARE(screenCast.closed, 1);
@@ -670,6 +700,7 @@ class TestCaptureFlow : public QObject {
     void multipleScreensRequirePipeWire() {
         testLayout << CaptureScreen{"external", {800, 0, 800, 600}, {}};
         auto capture = backend();
+        capture->setMethod(WaylandCapture::Method::ScreenCast);
         QSignalSpy failed(capture.get(), &ICaptureBackend::failed), frames(capture.get(), &ICaptureBackend::captured);
         capture->capture(CaptureMode::Region, 1);
         QTRY_COMPARE(failed.size(), 1);
@@ -687,6 +718,210 @@ class TestCaptureFlow : public QObject {
         QVERIFY(windows<SelectionOverlay>().isEmpty());
     }
 #endif
+    void oneShotAllMonitors_data() {
+        QTest::addColumn<int>("target");
+        QTest::newRow("all-monitors") << -1;
+        QTest::newRow("hdmi-only") << 1;
+        QTest::newRow("displayport-only") << 2;
+    }
+    void oneShotAllMonitors() {
+        QFETCH(int, target);
+        testLayout = {{"eDP-1", {0, 0, 960, 600}, {}, 1},
+                      {"HDMI-1", {-1280, 0, 1280, 720}, {}, 1.5},
+                      {"DP-1", {960, -180, 800, 600}, {}, 2}};
+        CaptureFrame atlas;
+        atlas.desktop = {-1280, -180, 3040, 900};
+        atlas.image = QImage(6080, 1800, QImage::Format_RGB32);
+        atlas.image.fill(Qt::black);
+        const QList<QColor> colors{Qt::green, Qt::blue, Qt::red};
+        QPainter painter(&atlas.image);
+        for (int i = 0; i < 3; ++i)
+            painter.fillRect(atlas.pixelRect(testLayout[i].desktop), colors[i]);
+        painter.end();
+        QVERIFY(atlas.image.save(images.filePath("all-monitors.png")));
+        screenshot.uri = QUrl::fromLocalFile(images.filePath("all-monitors.png")).toString();
+        auto capture = backend(false);
+        QSignalSpy frames(capture.get(), &ICaptureBackend::captured), errors(capture.get(), &ICaptureBackend::failed);
+        capture->capture(CaptureMode::Region, target);
+        QTRY_COMPARE(frames.size(), 1);
+        QVERIFY(errors.isEmpty());
+        const auto frame = qvariant_cast<CaptureFrame>(frames.first().first());
+        QCOMPARE(frame.screens.size(), target < 0 ? 3 : 1);
+        for (const auto &screen : frame.screens) {
+            int index = 0;
+            while (testLayout[index].name != screen.name)
+                ++index;
+            QCOMPARE(screen.image.size(), (screen.desktop.size() * 2).toSize());
+            QCOMPARE(screen.image.pixelColor(20, 20), colors[index]);
+        }
+        QCOMPARE(screenshot.requests, QList<bool>{false});
+        QCOMPARE(screenCast.created, 0);
+        QCOMPARE(screenCast.opened, 0);
+        QVERIFY(!capture->sharing());
+        // 三块屏幕的视频不会导致重复 Screenshot 调用或后台流连接。
+        QTest::qWait(80);
+        QCOMPARE(screenshot.requests.size(), 1);
+    }
+    void oneShotDeniedDoesNotStartSharing() {
+        screenshot.code = 2;
+        auto capture = backend(false);
+        QSignalSpy errors(capture.get(), &ICaptureBackend::failed), frames(capture.get(), &ICaptureBackend::captured);
+        capture->capture(CaptureMode::Region);
+        QTRY_COMPARE(errors.size(), 1);
+        QCOMPARE(screenCast.created, 0);
+        QVERIFY(frames.isEmpty());
+        screenshot.code = 0;
+        capture->capture(CaptureMode::Region);
+        QTRY_COMPARE(frames.size(), 1);
+        QCOMPARE(screenshot.requests, (QList<bool>{false, false}));
+    }
+    void oneShotRejectsWrongDesktopSize() {
+        testLayout << CaptureScreen{"external", {800, 0, 800, 600}, {}};
+        auto capture = backend(false);
+        QSignalSpy errors(capture.get(), &ICaptureBackend::failed), frames(capture.get(), &ICaptureBackend::captured);
+        capture->capture(CaptureMode::Region);
+        QTRY_COMPARE(errors.size(), 1);
+        QVERIFY(errors.first().first().toString().contains("不匹配"));
+        QVERIFY(frames.isEmpty());
+        QCOMPARE(screenCast.created, 0);
+    }
+    void cancelOneShotAndIgnoreLateResult() {
+        screenshot.delay = 100;
+        auto capture = backend(false);
+        QSignalSpy frames(capture.get(), &ICaptureBackend::captured);
+        capture->capture(CaptureMode::Region);
+        QTRY_COMPARE(screenshot.requests.size(), 1);
+        capture->cancel();
+        screenshot.delay = 0;
+        capture->capture(CaptureMode::Region);
+        QTRY_COMPARE(frames.size(), 1);
+        QTest::qWait(150);
+        QCOMPARE(frames.size(), 1);
+    }
+    void clickSelectsMonitorAndDragSelectsRegion() {
+        for (bool drag : {false, true}) {
+            Application app(nullptr, backend(false));
+            app.command({"--capture"});
+            QTRY_COMPARE(windows<SelectionOverlay>().size(), 1);
+            auto *overlay = windows<SelectionOverlay>().first();
+            QEnterEvent enter({50, 50}, {50, 50}, {50, 50});
+            QApplication::sendEvent(overlay, &enter);
+            QCOMPARE(overlay->selection().size(), QSizeF(image.size()));
+            QVERIFY(!overlay->canvasWidget());
+            QTest::mousePress(overlay, Qt::LeftButton, Qt::NoModifier, {50, 50});
+            QTest::mouseRelease(overlay, Qt::LeftButton, Qt::NoModifier, drag ? QPoint(200, 170) : QPoint(50, 50));
+            QTRY_COMPARE(overlay->phase(), SelectionOverlay::Phase::QuickEditing);
+            QCOMPARE(overlay->session()->document.original().size(), drag ? QSize(150, 120) : image.size());
+            QVERIFY(overlay->findChild<QFrame *>("quickToolbar")->isVisible());
+            QVERIFY(windows<EditorWindow>().isEmpty());
+            overlay->close();
+            QTRY_VERIFY(windows<SelectionOverlay>().isEmpty());
+        }
+        QCOMPARE(screenCast.created, 0);
+    }
+    void waylandOutputsExposeFrozenOverlays() {
+        if (!QGuiApplication::platformName().contains("wayland"))
+            QSKIP("需要真实 Wayland compositor；常规 D-Bus 测试使用 minimal QPA");
+        QVERIFY(testLayout.size() >= 3);
+        CaptureFrame atlas;
+        for (const auto &screen : testLayout)
+            atlas.desktop = atlas.desktop.united(screen.desktop);
+        atlas.image = QImage(atlas.desktop.size().toSize(), QImage::Format_RGB32);
+        atlas.image.fill(Qt::darkGreen);
+        QVERIFY(atlas.image.save(images.filePath("wayland.png")));
+        screenshot.uri = QUrl::fromLocalFile(images.filePath("wayland.png")).toString();
+        Application app(nullptr, backend(false));
+        app.command({"--capture"});
+        QTRY_COMPARE(windows<SelectionOverlay>().size(), testLayout.size());
+        // 合成器可能先发送默认输出 enter，然后才 leave/enter 到全屏指定输出。
+        QTest::qWait(200);
+        // 可选：通过 Weston 的 X11 后端注入鼠标，走实际 Wayland seat，避免直接给 QWidget 发事件。
+        const auto nativeWindows = qEnvironmentVariable("SNAPLING_TEST_WAYLAND_X11_WINDOWS").split(',', Qt::SkipEmptyParts);
+        const bool nativeMouse = !nativeWindows.isEmpty();
+        if (nativeMouse)
+            QCOMPARE(nativeWindows.size(), testLayout.size());
+        auto native = [](QStringList arguments) {
+            QProcess process;
+            process.start("xdotool", arguments);
+            return process.waitForFinished(3000) && process.exitStatus() == QProcess::NormalExit && process.exitCode() == 0;
+        };
+        QSet<QString> exposed;
+        for (auto *overlay : windows<SelectionOverlay>()) {
+            QTRY_VERIFY(overlay->windowHandle()->isExposed());
+            int screenIndex = 0;
+            while (testLayout[screenIndex].name != overlay->captureScreenName())
+                ++screenIndex;
+            QCOMPARE(overlay->size(), testLayout[screenIndex].desktop.size().toSize());
+            exposed.insert(overlay->captureScreenName());
+            if (nativeMouse) {
+                QVERIFY(native({"windowraise", nativeWindows[screenIndex]}));
+                QVERIFY(native({"mousemove", "--window", nativeWindows[screenIndex], "80", "80"}));
+            } else {
+                QEnterEvent enter({80, 80}, {80, 80}, {80, 80});
+                QApplication::sendEvent(overlay, &enter);
+            }
+            QTRY_COMPARE(overlay->selection().size(), QSizeF(overlay->size()));
+            if (nativeMouse)
+                for (auto *other : windows<SelectionOverlay>())
+                    if (other != overlay)
+                        QTRY_VERIFY(other->selection().isEmpty());
+            const auto preview = overlay->grab().toImage();
+            QCOMPARE(preview.pixelColor(preview.width() / 2, 0), QColor("#0bd18b"));
+            QVERIFY(preview.save(QCoreApplication::applicationDirPath() + "/wayland-" + overlay->captureScreenName() + ".png"));
+            if (!nativeMouse) {
+                QEvent leave(QEvent::Leave);
+                QApplication::sendEvent(overlay, &leave);
+                QVERIFY(overlay->selection().isEmpty());
+            }
+        }
+        QCOMPARE(exposed.size(), testLayout.size());
+        QTest::qWait(250);
+        SelectionOverlay *overlay = nullptr;
+        for (auto *candidate : windows<SelectionOverlay>()) {
+            QVERIFY(candidate->windowHandle()->isExposed());
+            // Wayland 不提供全局窗口位置；Qt 的推算 screen() 可能变化。
+            // 原生路径以对应输出中的鼠标命中、边框和导出尺寸验收。
+            if (candidate->captureScreenName() == testLayout.last().name)
+                overlay = candidate;
+        }
+        QVERIFY(overlay);
+        if (nativeMouse) {
+            QVERIFY(native({"windowraise", nativeWindows.last()}));
+            QVERIFY(native({"mousemove", "--window", nativeWindows.last(), "80", "80"}));
+            QTRY_VERIFY(!overlay->selection().isEmpty());
+            QVERIFY(native({"click", "1"}));
+        } else
+            QTest::mouseClick(overlay, Qt::LeftButton, Qt::NoModifier, {80, 80});
+        QTRY_COMPARE(windows<SelectionOverlay>().size(), 1);
+        QTRY_COMPARE(overlay->phase(), SelectionOverlay::Phase::QuickEditing);
+        QVERIFY(overlay->findChild<QFrame *>("quickToolbar")->isVisible());
+        QCOMPARE(overlay->session()->document.original().size(), atlas.pixelRect(testLayout.last().desktop).size());
+        if (nativeMouse) {
+            qInfo("native_wayland_monitor_hover_and_click=PASS");
+            overlay->close();
+            QTRY_VERIFY(windows<SelectionOverlay>().isEmpty());
+            app.command({"--capture"});
+            QTRY_COMPARE(windows<SelectionOverlay>().size(), testLayout.size());
+            QTest::qWait(200);
+            for (auto *candidate : windows<SelectionOverlay>())
+                if (candidate->captureScreenName() == testLayout.last().name)
+                    overlay = candidate;
+            QTRY_VERIFY(overlay->windowHandle()->isExposed());
+            QVERIFY(native({"windowraise", nativeWindows.last()}));
+            QVERIFY(native({"mousemove", "--window", nativeWindows.last(), "80", "80"}));
+            QTest::qWait(40);
+            QVERIFY(native({"mousedown", "1"}));
+            QTest::qWait(40);
+            QVERIFY(native({"mousemove", "--window", nativeWindows.last(), "300", "250"}));
+            QTRY_COMPARE(overlay->selection().size(), QSizeF(220, 170));
+            QVERIFY(native({"mouseup", "1"}));
+            QTRY_COMPARE(overlay->phase(), SelectionOverlay::Phase::QuickEditing);
+            QCOMPARE(overlay->session()->document.original().size(), QSize(220, 170));
+            QVERIFY(overlay->findChild<QFrame *>("quickToolbar")->isVisible());
+            qInfo("native_wayland_external_monitor_drag=PASS");
+        }
+        QCOMPARE(screenCast.created, 0);
+    }
     void cleanupTestCase() {
         auto bus = QDBusConnection::sessionBus();
         bus.unregisterObject(portalRoot);
@@ -697,7 +932,8 @@ int main(int argc, char **argv) {
     QTemporaryDir config;
     qputenv("XDG_CONFIG_HOME", config.path().toUtf8());
     qputenv("XDG_CACHE_HOME", config.path().toUtf8());
-    qputenv("QT_QPA_PLATFORM", "minimal");
+    if (!qEnvironmentVariableIsSet("SNAPLING_TEST_WAYLAND"))
+        qputenv("QT_QPA_PLATFORM", "minimal");
     qputenv("XDG_SESSION_TYPE", "wayland");
     qunsetenv("SNAPLING_TEST_X11");
     QApplication app(argc, argv);

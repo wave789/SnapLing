@@ -6,6 +6,7 @@
 #endif
 #include <QCoreApplication>
 #include <QGuiApplication>
+#include <QPointer>
 #include <QSocketNotifier>
 #ifdef Q_OS_WIN
 #include <windows.h>
@@ -174,6 +175,59 @@ namespace SnapLing {
 class PortalHotkey final : public IHotkeyBackend {
     Q_OBJECT
     QString session;
+    QPointer<PortalRequest> request;
+    quint64 generation = 0;
+    bool registered = false;
+
+    void fail(QString message) {
+        unbind();
+        emit status(message + "。可在 GNOME 自定义快捷键中绑定截图命令，或点击“重新注册快捷键”。", false);
+    }
+    static QString trigger(const QKeySequence &key) {
+        if (key.count() != 1)
+            return {};
+        const auto combination = key[0];
+        const int code = int(combination.key());
+        QString symbol;
+        if (code >= Qt::Key_A && code <= Qt::Key_Z)
+            symbol = QChar('a' + code - Qt::Key_A);
+        else if (code >= Qt::Key_0 && code <= Qt::Key_9)
+            symbol = QChar('0' + code - Qt::Key_0);
+        else if (code >= Qt::Key_F1 && code <= Qt::Key_F35)
+            symbol = "F" + QString::number(code - Qt::Key_F1 + 1);
+        else {
+            switch (code) {
+            case Qt::Key_Print: symbol = "Print"; break;
+            case Qt::Key_Return: symbol = "Return"; break;
+            case Qt::Key_Enter: symbol = "KP_Enter"; break;
+            case Qt::Key_Escape: symbol = "Escape"; break;
+            case Qt::Key_Space: symbol = "space"; break;
+            case Qt::Key_Tab: symbol = "Tab"; break;
+            case Qt::Key_Backspace: symbol = "BackSpace"; break;
+            case Qt::Key_Delete: symbol = "Delete"; break;
+            case Qt::Key_Insert: symbol = "Insert"; break;
+            case Qt::Key_Home: symbol = "Home"; break;
+            case Qt::Key_End: symbol = "End"; break;
+            case Qt::Key_PageUp: symbol = "Prior"; break;
+            case Qt::Key_PageDown: symbol = "Next"; break;
+            case Qt::Key_Left: symbol = "Left"; break;
+            case Qt::Key_Right: symbol = "Right"; break;
+            case Qt::Key_Up: symbol = "Up"; break;
+            case Qt::Key_Down: symbol = "Down"; break;
+            case Qt::Key_Plus: symbol = "plus"; break;
+            case Qt::Key_Minus: symbol = "minus"; break;
+            default: return {};
+            }
+        }
+        QStringList pieces;
+        const auto modifiers = combination.keyboardModifiers();
+        if (modifiers & Qt::ControlModifier) pieces << "CTRL";
+        if (modifiers & Qt::AltModifier) pieces << "ALT";
+        if (modifiers & Qt::ShiftModifier) pieces << "SHIFT";
+        if (modifiers & Qt::MetaModifier) pieces << "LOGO";
+        pieces << symbol;
+        return pieces.join('+');
+    }
 
   public:
     PortalHotkey() {
@@ -184,62 +238,110 @@ class PortalHotkey final : public IHotkeyBackend {
             "org.freedesktop.portal.GlobalShortcuts", "Activated", this,
             SLOT(triggered(QDBusObjectPath, QString, qulonglong, QVariantMap)));
     }
-    ~PortalHotkey() override {
-        unbind();
-    }
+    ~PortalHotkey() override { unbind(); }
     void unbind() override {
+        ++generation;
+        registered = false;
+        if (request) {
+            auto pending = request;
+            request = nullptr;
+            pending->cancel();
+        }
         if (session.isEmpty())
             return;
-        auto m = QDBusMessage::createMethodCall("org.freedesktop.portal.Desktop", session,
-                                                "org.freedesktop.portal.Session", "Close");
-        QDBusConnection::sessionBus().asyncCall(m);
+        QDBusConnection::sessionBus().disconnect("org.freedesktop.portal.Desktop", session,
+            "org.freedesktop.portal.Session", "Closed", this, SLOT(closed(QDBusMessage)));
+        auto message = QDBusMessage::createMethodCall("org.freedesktop.portal.Desktop", session,
+                                                      "org.freedesktop.portal.Session", "Close");
         session.clear();
+        QDBusConnection::sessionBus().asyncCall(message);
     }
     void bind(const QKeySequence &key) override {
         unbind();
-        if (!PortalRequest::version("org.freedesktop.portal.GlobalShortcuts")) {
-            emit status(
-                "系统未提供全局快捷键 Portal。请在 GNOME 设置 → 键盘 → 自定义快捷键中绑定 snapling --capture",
-                false);
+        if (key.isEmpty()) {
+            emit status("未启用截图快捷键", false);
             return;
         }
-        auto *r = new PortalRequest(this);
-        r->call("org.freedesktop.portal.GlobalShortcuts", "CreateSession", {},
-                {{"session_handle_token", "snapling_" + QUuid::createUuid().toString(QUuid::Id128)}},
-                [this, key](uint code, QVariantMap data, QString error) {
-                    if (code) {
-                        emit status(error.isEmpty() ? "快捷键授权取消，可绑定 snapling --capture" : error,
-                                    false);
-                        return;
-                    }
-                    session = data["session_handle"].toString();
-                    QString trigger = key.toString(QKeySequence::PortableText)
-                                          .replace("Ctrl+", "CTRL+")
-                                          .replace("Alt+", "ALT+")
-                                          .replace("Shift+", "SHIFT+")
-                                          .replace("Meta+", "LOGO+");
-                    QList<Shortcut> shortcuts{
-                        {"capture", {{"description", "SnapLing 截图"}, {"preferred_trigger", trigger}}}};
-                    auto *bindRequest = new PortalRequest(this);
-                    bindRequest->call(
-                        "org.freedesktop.portal.GlobalShortcuts", "BindShortcuts",
-                        {QVariant::fromValue(QDBusObjectPath(session)), QVariant::fromValue(shortcuts),
-                         QString()},
-                        {}, [this](uint c, QVariantMap data, QString error) {
-                            auto shortcuts = qdbus_cast<QList<Shortcut>>(data["shortcuts"]);
-                            bool ok = c == 0 && !shortcuts.isEmpty();
-                            emit status(ok ? "系统已授权截图快捷键"
-                                           : (error.isEmpty()
-                                                  ? "未绑定快捷键；请配置系统自定义快捷键 snapling --capture"
-                                                  : error),
-                                        ok);
-                        });
-                });
+        const auto preferred = trigger(key);
+        if (preferred.isEmpty()) {
+            emit status("此快捷键不受支持，请使用单组按键组合", false);
+            return;
+        }
+        emit status("正在向系统注册快捷键… 请完成系统授权", false);
+        const auto job = generation;
+        PortalRequest::queryVersion("org.freedesktop.portal.GlobalShortcuts", this,
+            [this, preferred, job](uint version, QString error) {
+                if (job != generation)
+                    return;
+                if (!version) {
+                    fail(error.isEmpty() ? "系统未提供全局快捷键 Portal" : error);
+                    return;
+                }
+                request = new PortalRequest(this, 10000);
+                request->call("org.freedesktop.portal.GlobalShortcuts", "CreateSession", {},
+                    {{"session_handle_token", "snapling_" + QUuid::createUuid().toString(QUuid::Id128)}},
+                    [this, preferred, job](uint code, QVariantMap data, QString error) {
+                        if (job != generation)
+                            return;
+                        request = nullptr;
+                        if (code) {
+                            fail(error.isEmpty() ? "快捷键会话创建被取消或拒绝" : error);
+                            return;
+                        }
+                        const auto handle = data.value("session_handle");
+                        session = handle.metaType() == QMetaType::fromType<QDBusObjectPath>()
+                                      ? qvariant_cast<QDBusObjectPath>(handle).path() : handle.toString();
+                        if (session.isEmpty() || session == "/" || !session.startsWith('/')) {
+                            fail("系统未返回有效的快捷键会话");
+                            return;
+                        }
+                        QDBusConnection::sessionBus().connect("org.freedesktop.portal.Desktop", session,
+                            "org.freedesktop.portal.Session", "Closed", this, SLOT(closed(QDBusMessage)));
+                        const QList<Shortcut> shortcuts{
+                            {"capture", {{"description", "SnapLing 截图"}, {"preferred_trigger", preferred}}}};
+                        request = new PortalRequest(this);
+                        request->call("org.freedesktop.portal.GlobalShortcuts", "BindShortcuts",
+                            {QVariant::fromValue(QDBusObjectPath(session)), QVariant::fromValue(shortcuts), QString()}, {},
+                            [this, job](uint code, QVariantMap data, QString error) {
+                                if (job != generation)
+                                    return;
+                                request = nullptr;
+                                if (code) {
+                                    fail(error.isEmpty() ? "快捷键授权被取消或拒绝" : error);
+                                    return;
+                                }
+                                const auto argument = qvariant_cast<QDBusArgument>(data.value("shortcuts"));
+                                if (argument.currentSignature() != "a(sa{sv})") {
+                                    fail("系统未返回有效的快捷键绑定");
+                                    return;
+                                }
+                                const auto shortcuts = qdbus_cast<QList<Shortcut>>(argument);
+                                for (const auto &shortcut : shortcuts)
+                                    if (shortcut.id == "capture") {
+                                        registered = true;
+                                        const auto description = shortcut.properties.value("trigger_description").toString();
+                                        emit status("系统已绑定截图快捷键" +
+                                                    (description.isEmpty() ? QString() : "：" + description), true);
+                                        return;
+                                    }
+                                fail("系统未绑定截图快捷键");
+                            });
+                    });
+            });
     }
+
   private slots:
-    void triggered(const QDBusObjectPath &s, const QString &id, qulonglong, const QVariantMap &) {
-        if (s.path() == session && id == "capture")
+    void triggered(const QDBusObjectPath &path, const QString &id, qulonglong, const QVariantMap &options) {
+        if (registered && path.path() == session && id == "capture") {
+            emit activationTokenAvailable(options.value("activation_token").toString());
             emit activated();
+        }
+    }
+    void closed(const QDBusMessage &message) {
+        if (message.path() == session) {
+            session.clear();
+            fail("系统关闭了快捷键会话");
+        }
     }
 };
 #endif

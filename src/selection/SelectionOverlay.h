@@ -13,7 +13,7 @@ class SelectionOverlay final : public QWidget {
     Q_OBJECT
   public:
     SelectionOverlay(CaptureFrame frame, CaptureMode mode, QWidget *parent = nullptr,
-                     std::shared_ptr<EditorSession> session = {});
+                     std::shared_ptr<EditorSession> session = {}, QString activationToken = {}, bool activate = true);
     ~SelectionOverlay() override;
     enum class Phase { Selecting, QuickEditing, AdvancedEditing, Cancelled };
     Phase phase() const { return currentPhase; }
@@ -26,6 +26,7 @@ class SelectionOverlay final : public QWidget {
         return selected;
     }
     void confirm();
+    void present(QString activationToken = {}, bool activate = true);
   signals:
     void accepted(QImage image);
     void cancelled();
@@ -43,6 +44,8 @@ class SelectionOverlay final : public QWidget {
     void wheelEvent(QWheelEvent *) override;
     void resizeEvent(QResizeEvent *) override;
     void closeEvent(QCloseEvent *) override;
+    void enterEvent(QEnterEvent *) override;
+    void leaveEvent(QEvent *) override;
 
   private:
     QPointF imagePoint(QPointF p) const;
@@ -58,8 +61,10 @@ class SelectionOverlay final : public QWidget {
     CaptureMode mode;
     QRectF selected, startRect;
     QPointF anchor, cursor;
+    QPointF pressPosition;
     QPolygonF points;
     bool dragging = false, moving = false, resizing = false;
+    bool hoverSelection = false;
     int zoom = 6;
     bool painted = false;
     Phase currentPhase = Phase::Selecting;

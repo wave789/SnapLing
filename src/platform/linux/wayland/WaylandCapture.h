@@ -19,11 +19,7 @@ class WaylandCapture final : public ICaptureBackend {
     void capture(CaptureMode, int screen = -1) override;
     void cancel() override;
     QString name() const override {
-#ifdef SNAPLING_HAVE_PIPEWIRE
-        return "Wayland ScreenCast / PipeWire 即时截图";
-#else
-        return "Wayland Screenshot Portal（PipeWire 未启用）";
-#endif
+        return method == Method::Screenshot ? "Wayland · 单次桌面截图" : "Wayland · ScreenCast 兼容截图";
     }
     bool hasWindowPicking() const override {
         return false;
@@ -35,6 +31,8 @@ class WaylandCapture final : public ICaptureBackend {
         return active;
     }
     QString capabilities() const;
+    enum class Method { Screenshot, ScreenCast };
+    void setMethod(Method method);
   signals:
     void sharingChanged(bool active);
   private slots:
@@ -60,6 +58,8 @@ class WaylandCapture final : public ICaptureBackend {
     QTimer frameTimer;
     QElapsedTimer frameWait;
     bool composing = false, allScreens = true;
+    Method method = Method::Screenshot;
+    uint screenCastVersion = 0;
     QString requestedScreen;
     QVector<CaptureScreen> layout;
     StreamFactory streamFactory;

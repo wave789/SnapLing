@@ -1,5 +1,6 @@
 #include "WaylandCapture.h"
 #include "Portal.h"
+#include "settings/Settings.h"
 #ifdef SNAPLING_HAVE_PIPEWIRE
 #include "PipeWireStream.h"
 #endif
@@ -11,6 +12,7 @@
 #include <QDBusUnixFileDescriptor>
 #include <QFutureWatcher>
 #include <QGuiApplication>
+#include <QImageReader>
 #include <QScreen>
 #include <QSettings>
 #include <QSet>
@@ -34,12 +36,14 @@ QVector<CaptureScreen> WaylandCapture::currentScreens() const {
 }
 WaylandCapture::WaylandCapture(QObject *p, StreamFactory factory, ScreenProvider screens)
     : ICaptureBackend(p), streamFactory(std::move(factory)), screenProvider(std::move(screens)) {
+    method = Settings().value("capture/waylandMethod", "screenshot").toString() == "screencast"
+                 ? Method::ScreenCast : Method::Screenshot;
     frameTimer.setInterval(20);
     connect(&frameTimer, &QTimer::timeout, this, &WaylandCapture::deliverFrame);
     auto changed = [this] {
         QSettings().remove(restoreKey);
         if (active || starting || capturePending)
-            failSharing("显示器连接或布局已改变，请重新截图并选择需要共享的屏幕。");
+            failSharing("显示器连接或布局已改变，请重新截图。");
     };
     auto watchScreen = [this, changed](QScreen *screen) {
         connect(screen, &QScreen::geometryChanged, this, [changed](const QRect &) { changed(); });
@@ -56,11 +60,13 @@ WaylandCapture::~WaylandCapture() {
     resetSharing();
 }
 QString WaylandCapture::capabilities() const {
-    return QString("Screenshot v%1 · ScreenCast v%2 · GlobalShortcuts v%3\nWayland "
-                   "可授权多个显示器；请选择需要截图的内置和外接屏幕。普通截图取得各屏首帧后结束共享。")
-        .arg(PortalRequest::version("org.freedesktop.portal.Screenshot"))
-        .arg(PortalRequest::version(iface))
-        .arg(PortalRequest::version("org.freedesktop.portal.GlobalShortcuts"));
+    return "默认一次捕获完整桌面，在各显示器上冻结画面并直接框选。首次使用可能需要系统截图授权。";
+}
+void WaylandCapture::setMethod(Method value) {
+    if (method == value)
+        return;
+    resetSharing();
+    method = value;
 }
 void WaylandCapture::cancel() {
     if (temporarySharing || starting || request)
@@ -70,6 +76,10 @@ void WaylandCapture::cancel() {
         capturePending = false;
         composing = false;
         frameTimer.stop();
+#ifdef SNAPLING_HAVE_PIPEWIRE
+        for (auto &source : sources)
+            source.stream->setActive(false);
+#endif
     }
 }
 void WaylandCapture::capture(CaptureMode, int screen) {
@@ -78,7 +88,7 @@ void WaylandCapture::capture(CaptureMode, int screen) {
         return;
     }
     const auto screens = currentScreens();
-    if (screens.isEmpty() || screen >= screens.size()) {
+    if (screens.isEmpty() || screens.size() > 16 || screen >= screens.size()) {
         emit failed("所选显示器已断开，请重新选择显示器");
         return;
     }
@@ -90,6 +100,13 @@ void WaylandCapture::capture(CaptureMode, int screen) {
     allScreens = screen < 0;
     requestedScreen = allScreens ? QString() : screens[screen].name;
     capturePending = true;
+    if (method == Method::Screenshot) {
+        ++generation;
+        frameWait.start();
+        qInfo("capture_backend=screenshot screens=%lld target=%d", qlonglong(layout.size()), screen);
+        portalCapture();
+        return;
+    }
 #ifdef SNAPLING_HAVE_PIPEWIRE
     if (active && !sources.empty()) {
         if (!requestedSourcesAvailable())
@@ -100,12 +117,7 @@ void WaylandCapture::capture(CaptureMode, int screen) {
     if (!starting)
         beginSharing(true);
 #else
-    if (layout.size() > 1) {
-        failSharing("Wayland 多显示器截图需要 PipeWire，请安装 libpipewire-0.3-dev 并启用 SNAPLING_PIPEWIRE 重新构建。");
-        return;
-    }
-    ++generation;
-    portalCapture();
+    failSharing("此构建未启用 PipeWire，请在设置中使用系统单次截图。");
 #endif
 }
 void WaylandCapture::portalCapture() {
@@ -118,9 +130,8 @@ void WaylandCapture::portalCapture() {
             return;
         request = nullptr;
         if (code) {
-            failSharing(error.isEmpty()
-                ? "系统未提供完整屏幕图像。即时框选需要启用 PipeWire，请安装开发依赖并重新构建。"
-                : "系统截图失败：" + error + "。即时框选需要启用 PipeWire。");
+            failSharing(error.isEmpty() ? "系统截图已取消或被拒绝。请检查系统隐私设置中的截图权限。"
+                                         : "系统截图失败：" + error);
             return;
         }
         const QUrl uri(data["uri"].toString());
@@ -128,27 +139,70 @@ void WaylandCapture::portalCapture() {
             failSharing("系统未返回有效的本地截图文件");
             return;
         }
-        auto *watcher = new QFutureWatcher<QImage>(this);
-        connect(watcher, &QFutureWatcher<QImage>::finished, this, [this, watcher, job] {
-            const auto image = watcher->result();
+        struct Result { CaptureFrame frame; QString error; };
+        auto *watcher = new QFutureWatcher<Result>(this);
+        connect(watcher, &QFutureWatcher<Result>::finished, this, [this, watcher, job] {
+            auto result = watcher->result();
             watcher->deleteLater();
             if (job != generation)
                 return;
-            if (image.isNull()) {
-                failSharing("系统截图文件无法读取");
+            if (!sameLayout(layout, currentScreens())) {
+                failSharing("截图期间显示器布局已改变，请重新截图。");
                 return;
             }
-            CaptureFrame frame;
-            frame.image = image;
-            frame.desktop = layout.first().desktop;
-            frame.screenName = layout.first().name;
+            if (!result.error.isEmpty()) {
+                failSharing(result.error);
+                return;
+            }
+            result.frame.captureMs = frameWait.elapsed();
             capturePending = false;
-            emit captured(frame);
+            emit captured(result.frame);
         });
-        watcher->setFuture(QtConcurrent::run(&workerPool, [path = uri.toLocalFile()] {
-            QImage image(path);
+        watcher->setFuture(QtConcurrent::run(&workerPool, [path = uri.toLocalFile(), screens = layout,
+                                                          target = requestedScreen, all = allScreens] {
+            Result result;
+            QImageReader reader(path);
+            const auto size = reader.size();
+            if (size.isEmpty() || qint64(size.width()) * size.height() > 100000000) {
+                result.error = "系统截图尺寸无效或超过 1 亿像素限制";
+                return result;
+            }
+            QImage image = reader.read();
             image.setDevicePixelRatio(1);
-            return image;
+            if (image.isNull()) {
+                result.error = "系统截图文件无法读取";
+                return result;
+            }
+            CaptureFrame atlas;
+            atlas.image = image;
+            for (const auto &screen : screens) {
+                if (screen.desktop.isEmpty()) {
+                    result.error = "显示器布局无效，请重新截图";
+                    return result;
+                }
+                atlas.desktop = atlas.desktop.united(screen.desktop);
+            }
+            // Mutter 的桌面截图使用统一的 stage 像素比例，不能把主屏图像误认为完整桌面。
+            const qreal scale = image.width() / atlas.desktop.width();
+            if (!qIsFinite(scale) || qAbs(image.height() - atlas.desktop.height() * scale) > 2) {
+                result.error = "系统截图与显示器布局不匹配。请检查显示器缩放，或在设置中选择兼容截图。";
+                return result;
+            }
+            for (auto screen : screens) {
+                if (!all && screen.name != target)
+                    continue;
+                screen.image = image.copy(atlas.pixelRect(screen.desktop));
+                screen.devicePixelRatio = scale;
+                result.frame.screens << std::move(screen);
+            }
+            if (result.frame.screens.isEmpty()) {
+                result.error = "所选显示器已断开，请重新截图";
+                return result;
+            }
+            result.frame.screenName = result.frame.screens.first().name;
+            result.frame.desktop = all ? atlas.desktop : result.frame.screens.first().desktop;
+            result.frame.image = all ? image : result.frame.screens.first().image;
+            return result;
         }));
     });
 }
@@ -165,45 +219,54 @@ void WaylandCapture::resetScreenSelection() {
     settings.remove(restoreKey);
     settings.remove("wayland/restoreToken");
     if (pending)
-        emit failed("已取消当前截图，请重新选择共享屏幕。");
+        emit failed("已取消当前截图，请重新选择兼容截图的屏幕。");
 }
 void WaylandCapture::beginSharing(bool temporary) {
 #ifndef SNAPLING_HAVE_PIPEWIRE
     Q_UNUSED(temporary)
     failSharing("此构建未启用 PipeWire，请安装 libpipewire-0.3-dev 并重新构建。");
 #else
-    if (PortalRequest::version(iface) == 0) {
-        failSharing("系统未提供 ScreenCast Portal，无法取得即时框选所需的完整屏幕帧。");
-        return;
-    }
     starting = true;
     temporarySharing = temporary;
     const auto job = ++generation;
-    request = new PortalRequest(this);
-    request->call(iface, "CreateSession", {},
-                  {{"session_handle_token", "snapling_" + QUuid::createUuid().toString(QUuid::Id128)}},
-                  [this, job](uint code, QVariantMap data, QString error) {
+    PortalRequest::queryVersion(iface, this, [this, job](uint version, QString error) {
         if (job != generation)
             return;
-        request = nullptr;
-        if (code) {
-            failSharing(error.isEmpty() ? "屏幕访问授权已取消" : error);
+        if (!version) {
+            failSharing(error.isEmpty() ? "系统未提供兼容截图接口 ScreenCast" : error);
             return;
         }
-        const auto handle = data.value("session_handle");
-        session = handle.metaType() == QMetaType::fromType<QDBusObjectPath>()
-                      ? qvariant_cast<QDBusObjectPath>(handle).path() : handle.toString();
-        if (session.isEmpty()) {
-            failSharing("Portal 未返回会话");
-            return;
-        }
-        QDBusConnection::sessionBus().connect("org.freedesktop.portal.Desktop", session,
-            "org.freedesktop.portal.Session", "Closed", this, SLOT(sessionClosed(QDBusMessage)));
-        selectSources();
+        screenCastVersion = version;
+        request = new PortalRequest(this);
+        request->call(iface, "CreateSession", {},
+                      {{"session_handle_token", "snapling_" + QUuid::createUuid().toString(QUuid::Id128)}},
+                      [this, job](uint code, QVariantMap data, QString error) {
+            if (job != generation)
+                return;
+            request = nullptr;
+            if (code) {
+                failSharing(error.isEmpty() ? "屏幕访问授权已取消" : error);
+                return;
+            }
+            const auto handle = data.value("session_handle");
+            session = handle.metaType() == QMetaType::fromType<QDBusObjectPath>()
+                          ? qvariant_cast<QDBusObjectPath>(handle).path() : handle.toString();
+            if (session.isEmpty()) {
+                failSharing("Portal 未返回会话");
+                return;
+            }
+            QDBusConnection::sessionBus().connect("org.freedesktop.portal.Desktop", session,
+                "org.freedesktop.portal.Session", "Closed", this, SLOT(sessionClosed(QDBusMessage)));
+            selectSources();
+        });
     });
 #endif
 }
 void WaylandCapture::waitForFrame() {
+#ifdef SNAPLING_HAVE_PIPEWIRE
+    for (auto &source : sources)
+        source.stream->setActive(allScreens || source.screen.name == requestedScreen);
+#endif
     frameWait.start();
     frameTimer.start();
     deliverFrame();
@@ -228,6 +291,7 @@ void WaylandCapture::deliverFrame() {
                 failSharing("10 秒内未获得所有所选显示器的画面，请检查屏幕共享服务并重新选择屏幕。");
             return;
         }
+        source.stream->setActive(false);
         frames << frame;
     }
     composing = true;
@@ -273,7 +337,7 @@ bool WaylandCapture::requestedSourcesAvailable() {
     if (!missing.isEmpty()) {
         QSettings().remove(restoreKey);
         failSharing("尚未授权这些显示器：" + missing.join("、") +
-                    "。请点击“重新选择共享屏幕”，在系统授权窗口中勾选需要的内置和外接屏幕。");
+                    "。请点击“重置兼容截图授权”，在系统授权窗口中勾选需要的内置和外接屏幕。");
         return false;
     }
 #endif
@@ -281,7 +345,7 @@ bool WaylandCapture::requestedSourcesAvailable() {
 }
 void WaylandCapture::selectSources() {
     QVariantMap opts{{"types", uint(1)}, {"multiple", true}, {"cursor_mode", uint(1)}};
-    if (PortalRequest::version(iface) >= 4) {
+    if (screenCastVersion >= 4) {
         opts["persist_mode"] = uint(2);
         QString token = QSettings().value(restoreKey).toString();
         if (!token.isEmpty())

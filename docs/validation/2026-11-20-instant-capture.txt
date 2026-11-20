@@ -1,0 +1,68 @@
+2026-11-20 / Debian 13 / GCC 14.2 / Qt 6.8.2
+Screenshot 图像使用测试服务。原生 Wayland 输入测试不代表 GNOME 系统取图或物理三屏验收。
+
+最终 CTest:
+[OUTPUT]
+Internal ctest changing into directory: /workspace/SnapLing/build
+
+[HANDLER_OUTPUT]
+Test project /workspace/SnapLing/build
+
+    Start 1: core
+1/7 Test #1: core .............................   Passed    2.57 sec
+    Start 2: translation_screenshot
+2/7 Test #2: translation_screenshot ...........   Passed    4.61 sec
+    Start 3: capture_flow
+3/7 Test #3: capture_flow .....................   Passed    6.74 sec
+    Start 4: portal_hotkey
+4/7 Test #4: portal_hotkey ....................   Passed    0.72 sec
+    Start 5: quick_edit
+5/7 Test #5: quick_edit .......................   Passed   62.67 sec
+    Start 6: quick_edit_scale_1.5
+6/7 Test #6: quick_edit_scale_1.5 .............   Passed   32.73 sec
+    Start 7: quick_edit_scale_2
+7/7 Test #7: quick_edit_scale_2 ...............   Passed   32.60 sec
+
+100% tests passed, 0 tests failed out of 7
+
+Total Test time (real) = 142.63 sec
+
+QtTest totals (includes init/cleanup):
+Totals: 41 passed, 0 failed, 0 skipped, 0 blacklisted, 2521ms
+Totals: 13 passed, 0 failed, 0 skipped, 0 blacklisted, 4557ms
+Totals: 36 passed, 0 failed, 1 skipped, 0 blacklisted, 6616ms
+Totals: 7 passed, 0 failed, 0 skipped, 0 blacklisted, 631ms
+Totals: 16 passed, 0 failed, 0 skipped, 0 blacklisted, 59478ms
+Totals: 9 passed, 0 failed, 0 skipped, 0 blacklisted, 29499ms
+Totals: 9 passed, 0 failed, 0 skipped, 0 blacklisted, 29427ms
+
+Native Wayland / Weston 14.0.2 / Pixman / X11 backend / Xvfb:
+********* Start testing of TestCaptureFlow *********
+Config: Using QtTest library 6.8.2, Qt 6.8.2 (x86_64-little_endian-lp64 shared (dynamic) release build; by GCC 14.2.0), debian 13
+PASS   : TestCaptureFlow::initTestCase()
+QINFO  : TestCaptureFlow::waylandOutputsExposeFrozenOverlays() capture_backend=screenshot screens=3 target=-1
+QINFO  : TestCaptureFlow::waylandOutputsExposeFrozenOverlays() hotkey_ready=0 status=未启用截图快捷键
+QINFO  : TestCaptureFlow::waylandOutputsExposeFrozenOverlays() capture_ms=43 trigger_to_pixels_ms=43 screens=3
+QINFO  : TestCaptureFlow::waylandOutputsExposeFrozenOverlays() trigger_to_selection_ms=55 screen=screen1
+QINFO  : TestCaptureFlow::waylandOutputsExposeFrozenOverlays() trigger_to_selection_ms=57 screen=screen2
+QINFO  : TestCaptureFlow::waylandOutputsExposeFrozenOverlays() trigger_to_selection_ms=59 screen=screen0
+QINFO  : TestCaptureFlow::waylandOutputsExposeFrozenOverlays() overlay_exposed=1 active=0 target=screen1 output=screen1 size=800x600
+QINFO  : TestCaptureFlow::waylandOutputsExposeFrozenOverlays() overlay_exposed=1 active=0 target=screen2 output=screen0 size=800x600
+QINFO  : TestCaptureFlow::waylandOutputsExposeFrozenOverlays() overlay_exposed=1 active=1 target=screen0 output=screen2 size=800x600
+QINFO  : TestCaptureFlow::waylandOutputsExposeFrozenOverlays() native_wayland_monitor_hover_and_click=PASS
+QINFO  : TestCaptureFlow::waylandOutputsExposeFrozenOverlays() capture_backend=screenshot screens=3 target=-1
+QINFO  : TestCaptureFlow::waylandOutputsExposeFrozenOverlays() capture_ms=61 trigger_to_pixels_ms=61 screens=3
+QINFO  : TestCaptureFlow::waylandOutputsExposeFrozenOverlays() trigger_to_selection_ms=73 screen=screen0
+QINFO  : TestCaptureFlow::waylandOutputsExposeFrozenOverlays() trigger_to_selection_ms=74 screen=screen1
+QINFO  : TestCaptureFlow::waylandOutputsExposeFrozenOverlays() trigger_to_selection_ms=75 screen=screen2
+QINFO  : TestCaptureFlow::waylandOutputsExposeFrozenOverlays() overlay_exposed=1 active=0 target=screen0 output=screen0 size=800x600
+QINFO  : TestCaptureFlow::waylandOutputsExposeFrozenOverlays() overlay_exposed=1 active=0 target=screen1 output=screen1 size=800x600
+QINFO  : TestCaptureFlow::waylandOutputsExposeFrozenOverlays() overlay_exposed=1 active=1 target=screen2 output=screen0 size=800x600
+QINFO  : TestCaptureFlow::waylandOutputsExposeFrozenOverlays() native_wayland_external_monitor_drag=PASS
+PASS   : TestCaptureFlow::waylandOutputsExposeFrozenOverlays()
+PASS   : TestCaptureFlow::cleanupTestCase()
+Totals: 3 passed, 0 failed, 0 skipped, 0 blacklisted, 1345ms
+********* Finished testing of TestCaptureFlow *********
+
+No PipeWire build / capture_flow:
+Totals: 17 passed, 0 failed, 1 skipped, 0 blacklisted, 3071ms
