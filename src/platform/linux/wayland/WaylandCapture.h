@@ -27,6 +27,7 @@ class WaylandCapture final : public ICaptureBackend {
     void startSharing();
     void stopSharing();
     void resetScreenSelection();
+    void resetScreenshotPermission();
     bool sharing() const {
         return active;
     }
@@ -35,11 +36,13 @@ class WaylandCapture final : public ICaptureBackend {
     void setMethod(Method method);
   signals:
     void sharingChanged(bool active);
+    void screenshotPermissionReset();
   private slots:
     void sessionClosed(const QDBusMessage &message);
 
   private:
     void portalCapture();
+    void reportScreenshotFailure(QString error);
     void beginSharing(bool temporary);
     void resetSharing();
     void failSharing(QString error);
@@ -58,6 +61,7 @@ class WaylandCapture final : public ICaptureBackend {
     QTimer frameTimer;
     QElapsedTimer frameWait;
     bool composing = false, allScreens = true;
+    bool resettingPermission = false;
     Method method = Method::Screenshot;
     uint screenCastVersion = 0;
     QString requestedScreen;

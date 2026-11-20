@@ -71,6 +71,16 @@ Wayland 默认请求非交互式 Screenshot，后台解码完整桌面，按 Qt 
 
 若系统不支持单次完整桌面截图，可主动切换「兼容截图」；仅该模式需要系统选择共享屏幕，主界面可「重置兼容截图授权」。拒绝单次截图不会自动改用共享或系统框选。区域框选目前在一块屏幕内完成，跨屏连续拖动框选尚未实现。三台物理屏幕的 GNOME 授权与覆盖层仍需实机验证，自动化范围见 [TESTING.md](TESTING.md)，原理及上游接口依据见 [截图设计](docs/CAPTURE_DESIGN.md)。
 
+若终端显示 `portal_screenshot_response code=2 has_uri=0`，表示系统没有交付图片，还没有进入多屏选区阶段。响应码 2 也可能来自截图服务错误，不能单凭此码断言权限被拒绝。新版会读取权限库并打印 `screenshot_permission app=... unidentified_host=...`；主界面的「重新请求截图授权」只清空 `io.snapling.SnapLing` 自己的截图授权决定，然后由系统重新询问，不直接写入允许，也不修改其他应用或未识别主机应用的记录。
+
+从源码运行时，建议先进行一次用户目录安装，确保 Portal 能找到 SnapLing 的 desktop 身份文件，无需 sudo：
+
+```bash
+cmake --install build --prefix "$HOME/.local"
+```
+
+退出旧进程后重新运行，点击「重新请求截图授权」，在系统询问时选择允许截图。启动日志的 `desktop_entry_installed=0` 表示尚未找到身份文件。若只存在未识别主机应用的拒绝记录，或重新授权后仍失败，请保留权限状态及系统 Portal 服务日志进一步排查，不自动清空共享权限或重启桌面服务。
+
 ## 离线 OCR
 
 模型随源码提供，约 6.4 MiB，安装至 `share/snapling/tessdata`，无需联网下载。首次点击 OCR 才加载模型。手动导入时选择含 `eng.traineddata` / `chi_sim.traineddata` 的目录。来源、许可证、大小和 SHA256 见 [models/README.md](models/README.md)。

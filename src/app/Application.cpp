@@ -152,6 +152,26 @@ Application::Application(QObject *p, std::unique_ptr<ICaptureBackend> captureBac
 #ifndef Q_OS_WIN
     if (auto *wayland = qobject_cast<WaylandCapture *>(backend.get())) {
         capabilities->setText(capabilities->text() + "\n" + wayland->capabilities());
+        auto *regrant = new QPushButton("重新请求截图授权");
+        regrant->setObjectName("retryScreenshotPermission");
+        regrant->setToolTip("清除 SnapLing 自己的截图授权记录，再由系统询问是否允许；不启用屏幕共享。");
+        layout->insertWidget(3, regrant);
+        connect(regrant, &QPushButton::clicked, this, [this, wayland] {
+            if (capturing || preparing || countdown) {
+                status->setText("请先完成或取消当前截图，再重新请求截图授权。");
+                return;
+            }
+            status->setStyleSheet({});
+            status->setText("正在重新请求 SnapLing 的系统截图授权…");
+            wayland->resetScreenshotPermission();
+        });
+        connect(wayland, &WaylandCapture::screenshotPermissionReset, this, [this, wayland] {
+            wayland->setMethod(WaylandCapture::Method::Screenshot);
+            settings.set("capture/waylandMethod", "screenshot");
+            if (auto *button = main.findChild<QPushButton *>("resetCompatibilityCapture"))
+                button->hide();
+            capture(CaptureMode(modeBox->currentIndex()));
+        });
         auto *reselect = new QPushButton("重置兼容截图授权");
         reselect->setObjectName("resetCompatibilityCapture");
         reselect->setVisible(settings.value("capture/waylandMethod", "screenshot").toString() == "screencast");

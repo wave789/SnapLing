@@ -10,10 +10,12 @@
 #include <QDBusAbstractAdaptor>
 #include <QDBusArgument>
 #include <QDBusConnection>
+#include <QDBusContext>
 #include <QDBusMessage>
 #include <QDBusMetaType>
 #include <QDBusObjectPath>
 #include <QDBusUnixFileDescriptor>
+#include <QDBusVariant>
 #include <QFrame>
 #include <QClipboard>
 #include <QPainter>
@@ -84,6 +86,34 @@ class TestSession : public QObject {
   public slots:
     void Close() { ++closed; }
 };
+using PermissionMap = QMap<QString, QStringList>;
+class PermissionStorePortal : public QObject, protected QDBusContext {
+    Q_OBJECT
+    Q_CLASSINFO("D-Bus Interface", "org.freedesktop.impl.portal.PermissionStore")
+  public:
+    PermissionMap records;
+    int writes = 0;
+    bool rejectWrite = false;
+    QString writtenApp;
+    QStringList writtenPermissions;
+  public slots:
+    void Lookup(const QString &, const QString &, PermissionMap &permissions, QDBusVariant &data) {
+        permissions = records;
+        data = QDBusVariant(QString("unchanged-test-metadata"));
+    }
+    void SetPermission(const QString &table, bool create, const QString &id,
+                       const QString &app, const QStringList &permissions) {
+        if (rejectWrite) {
+            sendErrorReply("org.freedesktop.DBus.Error.AccessDenied", "test refusal");
+            return;
+        }
+        Q_ASSERT(table == "screenshot" && create && id == "screenshot");
+        ++writes;
+        writtenApp = app;
+        writtenPermissions = permissions;
+        records[app] = permissions;
+    }
+};
 class ScreenshotPortal : public QObject {
     Q_OBJECT
     Q_CLASSINFO("D-Bus Interface", "org.freedesktop.portal.Screenshot")
@@ -94,10 +124,14 @@ class ScreenshotPortal : public QObject {
     uint code = 0;
     int delay = 0;
     QList<bool> requests;
+    PermissionStorePortal *permissions = nullptr;
+    bool respectPermissions = false;
   public slots:
     QDBusObjectPath Screenshot(const QString &, const QVariantMap &options) {
         requests << options["interactive"].toBool();
-        return respond(this, options, code, {{"uri", uri}}, delay);
+        const bool denied = respectPermissions && permissions->records.value("io.snapling.SnapLing").contains("no");
+        const uint response = denied ? 2 : code;
+        return respond(this, options, response, response ? QVariantMap{} : QVariantMap{{"uri", uri}}, delay);
     }
 };
 class ScreenCastPortal : public QDBusAbstractAdaptor {
@@ -187,6 +221,7 @@ class TestCaptureFlow : public QObject {
     Q_OBJECT
   private:
     ScreenshotPortal screenshot;
+    PermissionStorePortal permissionStore;
     ScreenCastPortal screenCast{&screenshot};
     QTemporaryDir images;
     QImage image;
@@ -237,9 +272,15 @@ class TestCaptureFlow : public QObject {
         qDBusRegisterMetaType<VideoNode>();
         qDBusRegisterMetaType<VideoNodes>();
         qDBusRegisterMetaType<CoordinatePair>();
+        qDBusRegisterMetaType<PermissionMap>();
+        qRegisterMetaType<PermissionMap>("PermissionMap");
         auto bus = QDBusConnection::sessionBus();
         QVERIFY(bus.isConnected());
         QVERIFY(bus.registerService(portalService));
+        QVERIFY(bus.registerService("org.freedesktop.impl.portal.PermissionStore"));
+        QVERIFY(bus.registerObject("/org/freedesktop/impl/portal/PermissionStore", &permissionStore,
+                                  QDBusConnection::ExportAllSlots));
+        screenshot.permissions = &permissionStore;
         QVERIFY(bus.registerObject(portalRoot, &screenshot,
             QDBusConnection::ExportAllSlots | QDBusConnection::ExportAllProperties | QDBusConnection::ExportAdaptors));
         QCOMPARE(PortalRequest::version("org.freedesktop.portal.ScreenCast"), uint(4));
@@ -256,6 +297,10 @@ class TestCaptureFlow : public QObject {
     void init() {
         screenshot.requests.clear();
         screenshot.code = 0;
+        screenshot.respectPermissions = false;
+        permissionStore.records.clear();
+        permissionStore.writes = 0;
+        permissionStore.rejectWrite = false;
         screenshot.delay = 0;
         screenshot.uri = QUrl::fromLocalFile(images.filePath("desktop.png")).toString();
         screenCast.created = screenCast.closed = screenCast.started = screenCast.opened = 0;
@@ -775,6 +820,70 @@ class TestCaptureFlow : public QObject {
         QTRY_COMPARE(frames.size(), 1);
         QCOMPARE(screenshot.requests, (QList<bool>{false, false}));
     }
+    void screenshotPermissionDiagnostics_data() {
+        QTest::addColumn<QString>("id");
+        QTest::addColumn<QString>("decision");
+        QTest::addColumn<QString>("message");
+        QTest::newRow("app-denied") << "io.snapling.SnapLing" << "no" << "已记住";
+        QTest::newRow("unidentified-host-denied") << "" << "no" << "未识别主机应用";
+        QTest::newRow("app-allowed-service-failure") << "io.snapling.SnapLing" << "yes" << "未发现";
+    }
+    void screenshotPermissionDiagnostics() {
+        QFETCH(QString, id);
+        QFETCH(QString, decision);
+        QFETCH(QString, message);
+        permissionStore.records[id] = {decision};
+        screenshot.code = 2;
+        auto capture = backend(false);
+        QSignalSpy errors(capture.get(), &ICaptureBackend::failed);
+        capture->capture(CaptureMode::Region);
+        QTRY_COMPARE(errors.size(), 1);
+        QVERIFY2(errors.first().first().toString().contains(message), qPrintable(errors.first().first().toString()));
+        QCOMPARE(permissionStore.writes, 0);
+        QCOMPARE(screenCast.created, 0);
+    }
+    void reRequestScreenshotPermissionFromMainWindow() {
+        permissionStore.records = {{"io.snapling.SnapLing", {"no"}}, {"", {"no"}}, {"another.app", {"yes"}}};
+        screenshot.respectPermissions = true;
+        Application app(nullptr, backend(false));
+        app.command({"--capture"});
+        auto *main = windows<QMainWindow>().first();
+        QTRY_VERIFY(main->findChild<QLabel *>("captureStatus")->text().contains("已记住"));
+        auto *retry = main->findChild<QPushButton *>("retryScreenshotPermission");
+        QVERIFY(retry);
+        QVERIFY(retry->isVisible());
+        retry->click();
+        QTRY_COMPARE(windows<SelectionOverlay>().size(), 1);
+        QCOMPARE(permissionStore.writes, 1);
+        QCOMPARE(permissionStore.writtenApp, QString("io.snapling.SnapLing"));
+        QVERIFY(permissionStore.writtenPermissions.isEmpty());
+        QCOMPARE(permissionStore.records.value(""), QStringList{"no"});
+        QCOMPARE(permissionStore.records.value("another.app"), QStringList{"yes"});
+        QCOMPARE(screenshot.requests, (QList<bool>{false, false}));
+        QCOMPARE(screenCast.created, 0);
+    }
+    void permissionResetFailureDoesNotCaptureOrGrant() {
+        permissionStore.rejectWrite = true;
+        auto capture = backend(false);
+        QSignalSpy errors(capture.get(), &ICaptureBackend::failed), reset(capture.get(), &WaylandCapture::screenshotPermissionReset);
+        capture->resetScreenshotPermission();
+        QTRY_COMPARE(errors.size(), 1);
+        QVERIFY(reset.isEmpty());
+        QCOMPARE(permissionStore.writes, 0);
+        QVERIFY(screenshot.requests.isEmpty());
+    }
+    void cancelPermissionResetIgnoresCompletionAndCanRetry() {
+        auto capture = backend(false);
+        QSignalSpy reset(capture.get(), &WaylandCapture::screenshotPermissionReset);
+        capture->resetScreenshotPermission();
+        capture->cancel();
+        QTest::qWait(50);
+        QVERIFY(reset.isEmpty());
+        QVERIFY(screenshot.requests.isEmpty());
+        capture->resetScreenshotPermission();
+        QTRY_COMPARE(reset.size(), 1);
+        QVERIFY(screenshot.requests.isEmpty());
+    }
     void captureFailuresAreVisibleAndRetryable_data() {
         QTest::addColumn<int>("code");
         QTest::addColumn<bool>("badLayout");
@@ -963,6 +1072,8 @@ class TestCaptureFlow : public QObject {
         auto bus = QDBusConnection::sessionBus();
         bus.unregisterObject(portalRoot);
         bus.unregisterService(portalService);
+        bus.unregisterObject("/org/freedesktop/impl/portal/PermissionStore");
+        bus.unregisterService("org.freedesktop.impl.portal.PermissionStore");
     }
 };
 int main(int argc, char **argv) {

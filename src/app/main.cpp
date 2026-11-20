@@ -3,6 +3,7 @@
 #include <QApplication>
 #include <QCommandLineParser>
 #include <QElapsedTimer>
+#include <QStandardPaths>
 #include <QTimer>
 #ifdef Q_OS_WIN
 #include <windows.h>
@@ -28,12 +29,13 @@ int main(int argc, char **argv) {
 #endif
     QElapsedTimer startup;
     startup.start();
+    // Qt 初始化平台服务时就可能向 Portal 注册身份，不能等构造 QApplication 后才设置。
+    QGuiApplication::setDesktopFileName("io.snapling.SnapLing");
     QApplication app(argc, argv);
     Q_INIT_RESOURCE(resources);
     app.setApplicationName("SnapLing");
     app.setOrganizationName("SnapLing");
     app.setApplicationVersion("0.1.0");
-    app.setDesktopFileName("io.snapling.SnapLing");
     app.setQuitOnLastWindowClosed(false);
     app.setWindowIcon(QIcon(":/snapling.svg"));
     QCommandLineParser parser;
@@ -68,6 +70,7 @@ int main(int argc, char **argv) {
     QTimer::singleShot(0, &application, [&] { application.command(arguments); });
     if (parser.isSet("exit-after"))
         QTimer::singleShot(qMax(1, parser.value("exit-after").toInt()), &app, &QCoreApplication::quit);
-    qInfo("startup_ms=%lld", startup.elapsed());
+    qInfo("startup_ms=%lld desktop_entry_installed=%d", startup.elapsed(),
+          !QStandardPaths::locate(QStandardPaths::ApplicationsLocation, "io.snapling.SnapLing.desktop").isEmpty());
     return app.exec();
 }

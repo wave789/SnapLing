@@ -23,6 +23,9 @@
 namespace SnapLing {
 static const QString iface = "org.freedesktop.portal.ScreenCast";
 static const QString restoreKey = "wayland/multiScreenRestoreToken";
+static const QString permissionService = "org.freedesktop.impl.portal.PermissionStore";
+static const QString permissionPath = "/org/freedesktop/impl/portal/PermissionStore";
+static const QString applicationId = "io.snapling.SnapLing";
 static bool sameLayout(const QVector<CaptureScreen> &a, const QVector<CaptureScreen> &b) {
     if (a.size() != b.size())
         return false;
@@ -69,7 +72,7 @@ void WaylandCapture::setMethod(Method value) {
     method = value;
 }
 void WaylandCapture::cancel() {
-    if (temporarySharing || starting || request)
+    if (temporarySharing || starting || request || resettingPermission)
         resetSharing();
     else {
         ++generation;
@@ -83,7 +86,7 @@ void WaylandCapture::cancel() {
     }
 }
 void WaylandCapture::capture(CaptureMode, int screen) {
-    if (capturePending) {
+    if (capturePending || resettingPermission) {
         emit failed("已有截图请求，请先完成或取消");
         return;
     }
@@ -131,9 +134,11 @@ void WaylandCapture::portalCapture() {
         request = nullptr;
         qInfo("portal_screenshot_response code=%u has_uri=%d", code, data.contains("uri"));
         if (code) {
-            failSharing(error.isEmpty() ? (code == 1 ? "系统截图授权已取消（Portal 响应码 1）。"
-                : QString("系统未提供截图（Portal 响应码 %1）。可能是截图权限被拒绝或桌面截图服务出错。若曾拒绝授权，系统可能直接拒绝后续请求而不再弹窗。").arg(code))
-                                         : "系统截图失败：" + error);
+            if (code == 2 && error.isEmpty())
+                reportScreenshotFailure("系统未提供截图（Portal 响应码 2）。");
+            else
+                failSharing(error.isEmpty() ? QString("系统截图授权已取消（Portal 响应码 %1）。").arg(code)
+                                            : "系统截图失败：" + error);
             return;
         }
         const QUrl uri(data["uri"].toString());
@@ -211,6 +216,77 @@ void WaylandCapture::portalCapture() {
             result.frame.image = all ? image : result.frame.screens.first().image;
             return result;
         }));
+    });
+}
+void WaylandCapture::reportScreenshotFailure(QString error) {
+    const auto job = generation;
+    auto message = QDBusMessage::createMethodCall(permissionService, permissionPath, permissionService, "Lookup");
+    message.setArguments({QString("screenshot"), QString("screenshot")});
+    auto *watcher = new QDBusPendingCallWatcher(QDBusConnection::sessionBus().asyncCall(message, 2500), this);
+    connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, watcher, job, error] {
+        const auto reply = watcher->reply();
+        watcher->deleteLater();
+        if (job != generation)
+            return;
+        if (reply.type() == QDBusMessage::ErrorMessage || reply.arguments().isEmpty()) {
+            qWarning("screenshot_permission_lookup_failed=%s", qPrintable(reply.errorName()));
+            failSharing(error + "无法读取系统权限记录。请查看系统截图服务日志，或点击“重新请求截图授权”后重试。");
+            return;
+        }
+        const auto argument = qvariant_cast<QDBusArgument>(reply.arguments().first());
+        if (argument.currentSignature() != "a{sas}") {
+            failSharing(error + "系统权限记录格式无效，请查看系统截图服务日志。");
+            return;
+        }
+        QStringList own, host;
+        argument.beginMap();
+        while (!argument.atEnd()) {
+            QString id;
+            QStringList permissions;
+            argument.beginMapEntry();
+            argument >> id >> permissions;
+            argument.endMapEntry();
+            if (id == applicationId)
+                own = permissions;
+            else if (id.isEmpty())
+                host = permissions;
+        }
+        argument.endMap();
+        auto decision = [](const QStringList &values) {
+            return values.contains("no") ? "no" : values.contains("yes") ? "yes" : "unset";
+        };
+        qInfo("screenshot_permission app=%s unidentified_host=%s", decision(own), decision(host));
+        if (own.contains("no"))
+            failSharing(error + "系统已记住对 SnapLing 截图权限的拒绝，不会再次弹窗。请点击“重新请求截图授权”，然后在系统弹窗中允许截图。");
+        else if (host.contains("no"))
+            failSharing(error + "系统对未识别主机应用保存了拒绝记录。需检查 SnapLing 的桌面安装和应用身份；不会自动修改其他应用共用的权限。请复制终端日志排查。");
+        else
+            failSharing(error + "未发现 SnapLing 或未识别主机应用的已保存拒绝记录。仍需检查实际应用身份及 xdg-desktop-portal、GNOME 截图服务日志；响应码 2 不能单独确定原因。");
+    });
+}
+void WaylandCapture::resetScreenshotPermission() {
+    if (capturePending || starting || resettingPermission) {
+        emit failed("请先完成或取消当前请求，再重新请求截图授权。");
+        return;
+    }
+    // 只清除本应用的授权决定，让系统再次询问；不写入 yes，不修改空 app ID 的共享记录。
+    resettingPermission = true;
+    const auto job = ++generation;
+    auto message = QDBusMessage::createMethodCall(permissionService, permissionPath, permissionService, "SetPermission");
+    message.setArguments({QString("screenshot"), true, QString("screenshot"), applicationId, QStringList{}});
+    auto *watcher = new QDBusPendingCallWatcher(QDBusConnection::sessionBus().asyncCall(message, 2500), this);
+    connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, watcher, job] {
+        const auto reply = watcher->reply();
+        watcher->deleteLater();
+        if (job != generation)
+            return;
+        resettingPermission = false;
+        if (reply.type() == QDBusMessage::ErrorMessage) {
+            failSharing("无法重新请求截图授权：" + reply.errorName() + "。请检查系统 PermissionStore 服务。");
+            return;
+        }
+        qInfo("screenshot_permission_reset app=io.snapling.SnapLing decision=unset");
+        emit screenshotPermissionReset();
     });
 }
 void WaylandCapture::startSharing() {
@@ -538,6 +614,7 @@ void WaylandCapture::failSharing(QString error) {
     emit failed(error);
 }
 void WaylandCapture::resetSharing() {
+    resettingPermission = false;
     ++generation;
     frameTimer.stop();
     starting = false;
