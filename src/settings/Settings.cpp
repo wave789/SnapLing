@@ -36,6 +36,7 @@ ProviderConfig Settings::provider() const {
     p.maxTokens = value("ai/maxTokens", 4096).toInt();
     p.temperature = value("ai/temperature", 0.1).toDouble();
     p.structuredJson = value("ai/json", true).toBool();
+    p.disableThinking = value("ai/disableThinking", p.isLocal()).toBool();
     return p;
 }
 void Settings::saveProvider(const ProviderConfig &p) {
@@ -48,5 +49,6 @@ void Settings::saveProvider(const ProviderConfig &p) {
     set("ai/maxTokens", p.maxTokens);
     set("ai/temperature", p.temperature);
     set("ai/json", p.structuredJson);
+    set("ai/disableThinking", p.disableThinking);
 }
 } // namespace SnapLing

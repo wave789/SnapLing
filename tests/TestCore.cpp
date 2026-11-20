@@ -7,9 +7,12 @@
 #include "selection/SelectionOverlay.h"
 #include "settings/Settings.h"
 #include "translation/TranslationProvider.h"
+#include "ui/EditorWindow.h"
+#include <QAction>
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QMessageBox>
 #include <QPainter>
 #include <QSignalSpy>
 #include <QTcpServer>
@@ -30,6 +33,27 @@ class TestCore : public QObject {
     static QVector<TranslationUnit> units() {
         return {{"a", "Hello", {}, "中文", "pending", QRectF(20, 20, 100, 30)},
                 {"b", "World", {}, "中文", "pending", QRectF(20, 60, 100, 30)}};
+    }
+    static void serveChat(QTcpServer &server, QJsonObject response, QByteArray &received) {
+        connect(&server, &QTcpServer::newConnection, &server, [&server, &received, response] {
+            auto *socket = server.nextPendingConnection();
+            connect(socket, &QTcpSocket::readyRead, socket, [socket, &received, response] {
+                received += socket->readAll();
+                auto boundary = received.indexOf("\r\n\r\n");
+                if (boundary < 0)
+                    return;
+                QRegularExpression length("Content-Length: ([0-9]+)",
+                                          QRegularExpression::CaseInsensitiveOption);
+                auto match = length.match(QString::fromLatin1(received.left(boundary)));
+                if (!match.hasMatch() || received.size() < boundary + 4 + match.captured(1).toInt())
+                    return;
+                auto bytes = QJsonDocument(response).toJson(QJsonDocument::Compact);
+                socket->write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " +
+                              QByteArray::number(bytes.size()) + "\r\nConnection: close\r\n\r\n" + bytes);
+                socket->disconnectFromHost();
+            });
+            connect(socket, &QTcpSocket::disconnected, socket, &QObject::deleteLater);
+        });
     }
   private slots:
     void initTestCase() {
@@ -218,6 +242,21 @@ class TestCore : public QObject {
         QCOMPARE(u[1].target, QString("世界"));
         QCOMPARE(u[0].status, QString("done"));
     }
+    void translationJsonWithThinking() {
+        auto u = units();
+        QString error;
+        QVERIFY2(OpenAiTranslationProvider::parse(
+                     "<think>Reasoning with braces { and a fake ID.}</think>\n```json\n"
+                     "{\"translations\":[{\"id\":\"a\",\"text\":\"你好\"},"
+                     "{\"id\":\"b\",\"text\":\"世界\"}]}\n```", u, error),
+                 qPrintable(error));
+        QCOMPARE(u[0].target, QString("你好"));
+        QCOMPARE(u[1].target, QString("世界"));
+        auto invalid = units();
+        QVERIFY(!OpenAiTranslationProvider::parse(
+            "<think>{\"translations\":[{\"id\":\"a\",\"text\":\"思考内容\"}]}", invalid, error));
+        QVERIFY(invalid[0].target.isEmpty());
+    }
     void badTranslationIsAtomic() {
         auto u = units();
         QString e;
@@ -324,6 +363,30 @@ class TestCore : public QObject {
         QVERIFY(!f.readAll().contains("secret-must-not-persist"));
         QCOMPARE(settings.value("hotkey/capture").toString(), QString("Ctrl+Shift+F8"));
     }
+    void thinkingSettings_data() {
+        QTest::addColumn<QString>("url");
+        QTest::addColumn<bool>("defaultDisabled");
+        QTest::newRow("ollama") << "http://127.0.0.1:11434/v1" << true;
+        QTest::newRow("localhost") << "http://localhost:11434/v1" << true;
+        QTest::newRow("ipv6") << "http://[::1]:11434/v1" << true;
+        QTest::newRow("remote") << "https://example.com/v1" << false;
+    }
+    void thinkingSettings() {
+        QFETCH(QString, url);
+        QFETCH(bool, defaultDisabled);
+        QTemporaryDir tmp;
+        const auto path = tmp.filePath("settings.ini");
+        Settings settings(path);
+        // 已有设置没有新字段时，本机 Ollama 自动采用新的默认值。
+        settings.set("ai/url", url);
+        auto config = settings.provider();
+        QCOMPARE(config.disableThinking, defaultDisabled);
+        for (bool disabled : {false, true}) {
+            config.disableThinking = disabled;
+            settings.saveProvider(config);
+            QCOMPARE(Settings(path).provider().disableThinking, disabled);
+        }
+    }
     void historyRetentionAndDelete() {
         QTemporaryDir tmp;
         HistoryStore h(tmp.filePath("history"));
@@ -341,58 +404,133 @@ class TestCore : public QObject {
         QVERIFY(h.entries().isEmpty());
         QVERIFY(!QFile::exists(path));
     }
+    void asynchronousHttpAndCancel_data() {
+        QTest::addColumn<QString>("content");
+        QTest::addColumn<QString>("reasoningField");
+        QTest::addColumn<QString>("finishReason");
+        QTest::addColumn<QString>("expectedError");
+        QTest::addColumn<bool>("disableThinking");
+        const QString translated =
+            "{\"translations\":[{\"id\":\"a\",\"text\":\"你好\"},{\"id\":\"b\",\"text\":\"世界\"}]}";
+        QTest::newRow("complete") << translated << "" << "stop" << "" << true;
+        QTest::newRow("without-reasoning-parameter") << translated << "" << "stop" << "" << false;
+        QTest::newRow("inline-thinking") << "<think>Translate each block.</think>\n" + translated
+                                         << "" << "stop" << "" << true;
+        QTest::newRow("complete-at-token-limit") << translated << "" << "length" << "" << true;
+        QTest::newRow("reasoning-token-limit") << "" << "reasoning" << "length" << "输出上限" << true;
+        QTest::newRow("truncated-json") << translated.left(40) << "" << "length" << "输出上限" << true;
+        QTest::newRow("reasoning-only") << "" << "reasoning" << "stop" << "思考" << true;
+        QTest::newRow("reasoning-content-only") << "" << "reasoning_content" << "stop" << "思考" << true;
+        QTest::newRow("empty-content") << "" << "" << "stop" << "空" << true;
+        QTest::newRow("invalid-json") << "invalid" << "" << "stop" << "JSON" << true;
+    }
     void asynchronousHttpAndCancel() {
+        QFETCH(QString, content);
+        QFETCH(QString, reasoningField);
+        QFETCH(QString, finishReason);
+        QFETCH(QString, expectedError);
+        QFETCH(bool, disableThinking);
         QTcpServer server;
         QVERIFY(server.listen(QHostAddress::LocalHost));
         QByteArray received;
-        connect(&server, &QTcpServer::newConnection, this, [&] {
-            auto *socket = server.nextPendingConnection();
-            connect(socket, &QTcpSocket::readyRead, socket, [&, socket] {
-                received += socket->readAll();
-                auto boundary = received.indexOf("\r\n\r\n");
-                if (boundary < 0)
-                    return;
-                auto headers = received.left(boundary);
-                QRegularExpression length("Content-Length: ([0-9]+)",
-                                          QRegularExpression::CaseInsensitiveOption);
-                auto match = length.match(QString::fromLatin1(headers));
-                if (!match.hasMatch() || received.size() < boundary + 4 + match.captured(1).toInt())
-                    return;
-                QJsonObject body{
-                    {"choices",
-                     QJsonArray{QJsonObject{
-                         {"message",
-                          QJsonObject{{"content", "{\"translations\":[{\"id\":\"a\",\"text\":\"你好\"},{"
-                                                  "\"id\":\"b\",\"text\":\"世界\"}]}"}}}}}}};
-                auto bytes = QJsonDocument(body).toJson(QJsonDocument::Compact);
-                socket->write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " +
-                              QByteArray::number(bytes.size()) + "\r\nConnection: close\r\n\r\n" + bytes);
-                socket->disconnectFromHost();
-            });
-            connect(socket, &QTcpSocket::disconnected, socket, &QObject::deleteLater);
-        });
+        QJsonObject message{{"content", content}};
+        if (!reasoningField.isEmpty())
+            message[reasoningField] = "Translate the blocks.";
+        serveChat(server, {{"choices", QJsonArray{QJsonObject{{"message", message},
+                                                             {"finish_reason", finishReason}}}}}, received);
         OpenAiTranslationProvider provider;
         QSignalSpy done(&provider, &ITranslationProvider::completed),
             failed(&provider, &ITranslationProvider::failed);
         ProviderConfig config;
+        config.disableThinking = disableThinking;
         config.baseUrl = QString("http://127.0.0.1:%1/v1").arg(server.serverPort());
         provider.translate(units(), config);
-        QTRY_COMPARE_WITH_TIMEOUT(done.size(), 1, 5000);
-        QCOMPARE(failed.size(), 0);
+        QTRY_COMPARE_WITH_TIMEOUT(done.size() + failed.size(), 1, 5000);
+        if (expectedError.isEmpty()) {
+            QCOMPARE(failed.size(), 0);
+            auto result = qvariant_cast<QVector<TranslationUnit>>(done[0][0]);
+            QCOMPARE(result[0].target, QString("你好"));
+            QCOMPARE(result[1].target, QString("世界"));
+        } else {
+            QCOMPARE(done.size(), 0);
+            QVERIFY2(failed[0][0].toString().contains(expectedError),
+                     qPrintable(failed[0][0].toString()));
+        }
         QVERIFY(received.startsWith("POST /v1/chat/completions"));
         auto payload = QJsonDocument::fromJson(received.mid(received.indexOf("\r\n\r\n") + 4)).object();
         QCOMPARE(payload["model"].toString(), config.model);
+        if (disableThinking)
+            QCOMPARE(payload["reasoning_effort"].toString(), QString("none"));
+        else
+            QVERIFY(!payload.contains("reasoning_effort"));
         QVERIFY(!payload.contains("tools"));
-        auto result = qvariant_cast<QVector<TranslationUnit>>(done[0][0]);
-        QCOMPARE(result[0].target, QString("你好"));
+        done.clear();
+        failed.clear();
         QTcpServer stall;
         QVERIFY(stall.listen(QHostAddress::LocalHost));
         config.baseUrl = QString("http://127.0.0.1:%1/v1").arg(stall.serverPort());
         provider.translate(units(), config);
         provider.cancel();
         QTRY_COMPARE(failed.size(), 1);
-        QCOMPARE(done.size(), 1);
+        QCOMPARE(done.size(), 0);
         QVERIFY(failed[0][0].toString().contains("取消"));
+    }
+    void editorInPlaceTranslation() {
+#ifdef SNAPLING_HAVE_TESSERACT
+        QTemporaryDir tmp;
+        Settings settings(tmp.filePath("settings.ini"));
+        settings.set("ocr/path", findTessdata());
+        settings.set("ocr/languages", "eng");
+        ProviderConfig config;
+        QTcpServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost));
+        config.baseUrl = QString("http://127.0.0.1:%1/v1").arg(server.serverPort());
+        QByteArray received;
+        serveChat(server, {{"choices", QJsonArray{QJsonObject{
+            {"message", QJsonObject{{"content", "<think>Translate.</think>\n"
+                "{\"translations\":[{\"id\":\"line_0\",\"text\":\"你好，世界\"}]}"}}},
+            {"finish_reason", "stop"}}}}}, received);
+        QImage image(600, 160, QImage::Format_RGB32);
+        image.fill(Qt::white);
+        QPainter painter(&image);
+        QFont font("Noto Sans CJK SC");
+        font.setPixelSize(40);
+        painter.setFont(font);
+        painter.setPen(Qt::black);
+        painter.drawText(QRect(20, 30, 560, 80), Qt::AlignLeft | Qt::AlignVCenter, "Hello world");
+        painter.end();
+        EditorWindow editor(image, settings, config);
+        QString errorDialog;
+        QTimer dismissErrors;
+        connect(&dismissErrors, &QTimer::timeout, this, [&] {
+            for (auto *widget : QApplication::topLevelWidgets())
+                if (auto *dialog = qobject_cast<QMessageBox *>(widget)) {
+                    errorDialog = dialog->text();
+                    dialog->accept();
+                }
+        });
+        dismissErrors.start(20);
+        QAction *translate = nullptr;
+        for (auto *action : editor.findChildren<QAction *>())
+            if (action->text() == "原地翻译")
+                translate = action;
+        QVERIFY(translate);
+        translate->trigger();
+        QTRY_VERIFY_WITH_TIMEOUT(!editor.document()->state().translations.isEmpty() || !errorDialog.isEmpty(),
+                                 10000);
+        QVERIFY2(errorDialog.isEmpty(), qPrintable(errorDialog));
+        QCOMPARE(editor.document()->state().translations.size(), 1);
+        QCOMPARE(editor.document()->state().translationMode, 1);
+        QCOMPARE(editor.document()->state().translations[0].target, QString("你好，世界"));
+        QVERIFY(editor.document()->render() != editor.document()->original());
+        QString error;
+        const auto output = tmp.filePath("translated.png");
+        QVERIFY2(editor.document()->exportImage(output, error), qPrintable(error));
+        QCOMPARE(QImage(output).convertToFormat(QImage::Format_ARGB32_Premultiplied),
+                 editor.document()->render());
+#else
+        QSKIP("此构建未包含 OCR 引擎");
+#endif
     }
     void realOfflineOcr() {
 #ifdef SNAPLING_HAVE_TESSERACT

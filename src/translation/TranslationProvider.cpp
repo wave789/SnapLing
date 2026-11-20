@@ -25,6 +25,14 @@ void OpenAiTranslationProvider::cancel() {
 }
 bool OpenAiTranslationProvider::parse(QString text, QVector<TranslationUnit> &units, QString &error) {
     text = text.trimmed();
+    if (text.startsWith("<think>")) {
+        int end = text.indexOf("</think>");
+        if (end < 0) {
+            error = "模型的思考过程尚未结束，未返回译文。请开启“关闭思考模式”后重试。";
+            return false;
+        }
+        text = text.mid(end + 8).trimmed();
+    }
     if (text.startsWith("```")) {
         int line = text.indexOf('\n');
         if (line >= 0)
@@ -36,7 +44,7 @@ bool OpenAiTranslationProvider::parse(QString text, QVector<TranslationUnit> &un
     QJsonParseError parse;
     auto document = QJsonDocument::fromJson(text.trimmed().toUtf8(), &parse);
     if (parse.error != QJsonParseError::NoError) {
-        error = "模型返回的 JSON 无法解析。可关闭严格 JSON 模式重试。";
+        error = "模型返回的翻译 JSON 无法解析，请检查模型是否支持 JSON 输出。";
         return false;
     }
     QJsonArray items = document.isArray() ? document.array() : document.object()["translations"].toArray();
@@ -103,6 +111,9 @@ void OpenAiTranslationProvider::translate(QVector<TranslationUnit> units, Provid
                                                                   .toJson(QJsonDocument::Compact))}}}}};
     if (cfg.structuredJson)
         payload["response_format"] = QJsonObject{{"type", "json_object"}};
+    // Ollama 的 Qwen 思考会占用 max_tokens，可能在生成译文前耗尽输出额度。
+    if (cfg.disableThinking)
+        payload["reasoning_effort"] = "none";
     QNetworkRequest request(url);
     request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::ManualRedirectPolicy);
@@ -135,7 +146,7 @@ void OpenAiTranslationProvider::translate(QVector<TranslationUnit> units, Provid
             return;
         }
         if (r->property("timedOut").toBool()) {
-            emit failed("翻译请求超时");
+            emit failed("翻译请求超时。请在 AI 翻译设置中增加超时时间，本地服务请确认模型已加载。");
             return;
         }
         int status = r->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
@@ -152,8 +163,20 @@ void OpenAiTranslationProvider::translate(QVector<TranslationUnit> units, Provid
             emit failed("服务未返回兼容的 Chat Completions JSON");
             return;
         }
-        QString text = choices[0].toObject()["message"].toObject()["content"].toString(), error;
+        auto choice = choices[0].toObject();
+        auto message = choice["message"].toObject();
+        QString text = message["content"].toString(), error;
         if (!parse(text, units, error)) {
+            if (choice["finish_reason"].toString() == "length")
+                error = "模型达到输出上限，译文未完整生成。请开启“关闭思考模式”、增加最大输出 token，"
+                        "或选择较少文字后重试。";
+            else if (text.trimmed().isEmpty()) {
+                bool hasReasoning = !message["reasoning"].toString().trimmed().isEmpty() ||
+                                    !message["reasoning_content"].toString().trimmed().isEmpty();
+                error = hasReasoning
+                            ? "模型只返回了思考过程，未返回译文。请开启“关闭思考模式”后重试。"
+                            : "模型返回了空译文，请检查所选模型和翻译服务。";
+            }
             emit failed(error);
             return;
         }

@@ -122,8 +122,13 @@ SettingsDialog::SettingsDialog(Settings &s, ProviderConfig &runtime, QWidget *pa
     ai->addRow("密钥环境变量", env);
     ai->addRow("临时 API Key", secret);
     ai->addRow("目标语言", language);
+    auto *disableThinking = new QCheckBox("关闭思考模式（加快翻译）");
+    disableThinking->setChecked(runtime.disableThinking);
+    disableThinking->setToolTip(
+        "适用于 Ollama 和支持 reasoning_effort 的兼容服务。服务不支持此参数时，请取消勾选。");
     connect(preset, qOverload<int>(&QComboBox::activated), this, [=](int index) {
         name->setText(preset->currentText());
+        disableThinking->setChecked(index == 0);
         if (index == 0) {
             url->setText("http://127.0.0.1:11434/v1");
             model->setText("qwen3.5:4b");
@@ -148,6 +153,7 @@ SettingsDialog::SettingsDialog(Settings &s, ProviderConfig &runtime, QWidget *pa
     auto *json = new QCheckBox("发送 response_format: json_object");
     json->setChecked(runtime.structuredJson);
     ai->addRow(json);
+    ai->addRow(disableThinking);
     auto config = [=] {
         ProviderConfig p;
         p.name = name->text().trimmed();
@@ -160,6 +166,7 @@ SettingsDialog::SettingsDialog(Settings &s, ProviderConfig &runtime, QWidget *pa
         p.maxTokens = tokens->value();
         p.temperature = temp->value();
         p.structuredJson = json->isChecked();
+        p.disableThinking = disableThinking->isChecked();
         return p;
     };
     auto profiles =
@@ -185,6 +192,9 @@ SettingsDialog::SettingsDialog(Settings &s, ProviderConfig &runtime, QWidget *pa
         tokens->setValue(o["tokens"].toInt(4096));
         temp->setValue(o["temperature"].toDouble(.1));
         json->setChecked(o["json"].toBool(true));
+        ProviderConfig profile;
+        profile.baseUrl = url->text();
+        disableThinking->setChecked(o["disableThinking"].toBool(profile.isLocal()));
         secret->clear();
     });
     auto *profileButtons = new QWidget;
@@ -207,7 +217,8 @@ SettingsDialog::SettingsDialog(Settings &s, ProviderConfig &runtime, QWidget *pa
                       {"timeout", p.timeoutSeconds},
                       {"tokens", p.maxTokens},
                       {"temperature", p.temperature},
-                      {"json", p.structuredJson}};
+                      {"json", p.structuredJson},
+                      {"disableThinking", p.disableThinking}};
         int found = -1;
         for (int i = 0; i < profiles->size(); ++i)
             if (profiles->at(i).toObject()["name"] == p.name)

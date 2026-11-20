@@ -8,7 +8,7 @@ struct ProviderConfig {
     QString sessionKey; // 仅在进程内保存，不序列化。
     int timeoutSeconds = 90, maxTokens = 4096;
     double temperature = 0.1;
-    bool structuredJson = true;
+    bool structuredJson = true, disableThinking = true;
     bool isLocal() const;
 };
 class Settings {
