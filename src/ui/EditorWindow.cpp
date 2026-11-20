@@ -2,6 +2,7 @@
 #include "editor/AnnotationTools.h"
 #include "PinWindow.h"
 #include "image/ImageProcessor.h"
+#include "ToolIcons.h"
 #include <QApplication>
 #include <QClipboard>
 #include <QComboBox>
@@ -17,6 +18,8 @@
 #include <QScreen>
 #include <QStatusBar>
 #include <QToolBar>
+#include <QToolButton>
+#include <QStyle>
 #include <QtConcurrent>
 namespace SnapLing {
 EditorWindow::EditorWindow(QImage image, Settings &s, ProviderConfig &c)
@@ -68,7 +71,27 @@ EditorWindow::EditorWindow(std::shared_ptr<EditorSession> session)
         QApplication::clipboard()->setText(l.all());
     });
     action("导出文字", [this] { exportText(); });
-    action("原地翻译", [this] { translate(); });
+    auto *translation = action("原地翻译", [this] { translate(); });
+    translation->setIcon(toolIcon(ToolIcon::Translate));
+    translation->setCheckable(true);
+    auto *translationButton = qobject_cast<QToolButton *>(actions->widgetForAction(translation));
+    translationButton->setObjectName("translationButton");
+    translationButton->setAccessibleName("原地翻译");
+    actions->setStyleSheet("QToolButton[translationActive=\"true\"]{background:#08b783;border-radius:5px}");
+    auto updateTranslation = [translation, translationButton](bool enabled) {
+        translation->setChecked(enabled);
+        translation->setToolTip(enabled ? "取消翻译，恢复原图" : "原地翻译");
+        translationButton->setToolTip(translation->toolTip());
+        translationButton->setProperty("translationActive", enabled);
+        translationButton->style()->unpolish(translationButton);
+        translationButton->style()->polish(translationButton);
+        translationButton->update();
+    };
+    connect(editing.get(), &EditorSession::translationStateChanged, this, updateTranslation);
+    connect(translation, &QAction::triggered, this, [this, updateTranslation] {
+        updateTranslation(editing->isTranslationEnabled());
+    });
+    updateTranslation(editing->isTranslationEnabled());
     action("调整译文", [this] { editTranslation(); });
     auto *mode = new QComboBox;
     mode->addItems({"原文", "译文", "对照"});
@@ -191,7 +214,7 @@ void EditorWindow::runOcr(bool thenTranslate) {
     editing->runOcr(thenTranslate);
 }
 void EditorWindow::translate() {
-    editing->translate(canvas->selectedLines());
+    editing->toggleTranslation(canvas->selectedLines());
 }
 void EditorWindow::copy() {
     if (!canvas->selectedText().isEmpty())

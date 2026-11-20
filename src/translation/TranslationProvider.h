@@ -35,7 +35,8 @@ class OpenAiTranslationProvider final : public ITranslationProvider {
     QTimer timeout;
     bool cancelled = false;
 };
-QVector<TranslationUnit> translationUnits(const QVector<OcrLine> &lines, QString language);
+QVector<TranslationUnit> translationUnits(const QVector<OcrLine> &lines, QString language,
+                                         bool automatic = false);
 } // namespace SnapLing
 Q_DECLARE_METATYPE(SnapLing::TranslationUnit)
 Q_DECLARE_METATYPE(QVector<SnapLing::TranslationUnit>)

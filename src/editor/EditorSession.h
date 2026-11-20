@@ -28,6 +28,8 @@ class EditorSession final : public QObject {
     QString translationEndpoint() const;
     void runOcr(bool thenTranslate = false);
     void translate(QVector<OcrLine> selected = {});
+    void toggleTranslation(QVector<OcrLine> selected = {});
+    bool isTranslationEnabled() const { return translationEnabled; }
     void approveTranslation(bool allowed);
     void cancel();
     void copyImage();
@@ -40,12 +42,14 @@ class EditorSession final : public QObject {
     void taskChanged();
     void translationApprovalRequested(QString endpoint);
     void imageSaved(QString path);
+    void translationStateChanged(bool enabled);
 
   private:
     void initialize();
     void notify(QString message, bool error = false);
     void setTask(Task task);
     void startTranslation();
+    void setTranslationEnabled(bool enabled);
     bool sourceUnchanged();
     TesseractOcr ocr;
     OpenAiTranslationProvider provider;
@@ -53,6 +57,10 @@ class EditorSession final : public QObject {
     bool translateAfterOcr = false, approvalPending = false;
     qint64 sourceKey = 0;
     QVector<OcrLine> translationLines;
+    QVector<TranslationUnit> requestUnits;
+    bool translateSelected = false;
+    bool translationEnabled = false;
+    int preservedLines = 0;
     QString lastMessage, lastSavedPath;
     ProviderConfig requestConfig;
 };

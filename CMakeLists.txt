@@ -18,7 +18,7 @@ set(SOURCES
  src/editor/EditorSession.cpp src/editor/AnnotationTools.cpp
  src/ocr/OcrEngine.cpp src/ocr/TextLayout.cpp src/translation/TranslationProvider.cpp
  src/image/ImageProcessor.cpp src/history/HistoryStore.cpp src/settings/Settings.cpp
- src/ui/EditorWindow.cpp src/ui/SettingsDialog.cpp src/ui/PinWindow.cpp
+ src/ui/EditorWindow.cpp src/ui/SettingsDialog.cpp src/ui/PinWindow.cpp src/ui/ToolIcons.cpp
  src/app/SingleInstance.cpp src/app/Application.cpp resources/resources.qrc)
 if(WIN32)
  list(APPEND SOURCES src/platform/windows/WindowsCapture.cpp)
@@ -91,6 +91,13 @@ if(BUILD_TESTING)
  target_link_libraries(snapling_tests PRIVATE snapling_lib Qt6::Test)
  add_test(NAME core COMMAND snapling_tests)
  set_tests_properties(core PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen;TESSDATA_PREFIX=${PROJECT_SOURCE_DIR}/models/tessdata")
+ if(SNAPLING_TESSERACT)
+  add_executable(snapling_translation_screenshot_test tests/TestTranslationScreenshot.cpp)
+  target_link_libraries(snapling_translation_screenshot_test PRIVATE snapling_lib Qt6::Test)
+  add_test(NAME translation_screenshot COMMAND snapling_translation_screenshot_test)
+  set_tests_properties(translation_screenshot PROPERTIES
+   ENVIRONMENT "QT_QPA_PLATFORM=offscreen;TESSDATA_PREFIX=${PROJECT_SOURCE_DIR}/models/tessdata" TIMEOUT 120)
+ endif()
  if(UNIX)
   add_executable(snapling_portal_test tests/TestPortal.cpp)
   target_link_libraries(snapling_portal_test PRIVATE snapling_lib Qt6::Test)
@@ -113,16 +120,18 @@ if(BUILD_TESTING)
   find_program(XVFB_RUN xvfb-run)
   find_program(XDOTOOL xdotool)
   if(XVFB_RUN AND XDOTOOL)
-   add_test(NAME quick_edit COMMAND ${XVFB_RUN} -a -s "-screen 0 1920x1080x24" $<TARGET_FILE:snapling_quick_edit_test>)
+   add_test(NAME quick_edit COMMAND ${XVFB_RUN} -a -n 220 -e "${CMAKE_CURRENT_BINARY_DIR}/quick-edit-xvfb.log" -s "-screen 0 1920x1080x24" $<TARGET_FILE:snapling_quick_edit_test>)
    set_tests_properties(quick_edit PROPERTIES ENVIRONMENT "TESSDATA_PREFIX=${PROJECT_SOURCE_DIR}/models/tessdata")
+   set(SNAPLING_XVFB_DISPLAY 221)
    foreach(SCALE IN ITEMS 1.5 2)
-    add_test(NAME quick_edit_scale_${SCALE} COMMAND ${XVFB_RUN} -a -s "-screen 0 1920x1080x24" $<TARGET_FILE:snapling_quick_edit_test>
-     instantAnnotations nativeMouseRelease instantOcr advancedHandoff translatedPng)
+    add_test(NAME quick_edit_scale_${SCALE} COMMAND ${XVFB_RUN} -a -n ${SNAPLING_XVFB_DISPLAY} -e "${CMAKE_CURRENT_BINARY_DIR}/quick-edit-scale-${SCALE}-xvfb.log" -s "-screen 0 1920x1080x24" $<TARGET_FILE:snapling_quick_edit_test>
+     instantAnnotations nativeMouseRelease instantOcr advancedHandoff translatedPng iconToolbarAndTranslationToggle)
     set_tests_properties(quick_edit_scale_${SCALE} PROPERTIES ENVIRONMENT "TESSDATA_PREFIX=${PROJECT_SOURCE_DIR}/models/tessdata;QT_SCALE_FACTOR=${SCALE}")
+    math(EXPR SNAPLING_XVFB_DISPLAY "${SNAPLING_XVFB_DISPLAY} + 1")
    endforeach()
-   # xvfb-run -a 在并行启动时可能同时选到同一空闲显示号。
+   # 在共享宿主上隔离桌面初始化，保留 Xvfb 日志以诊断启动失败。
    set_tests_properties(quick_edit quick_edit_scale_1.5 quick_edit_scale_2
-    PROPERTIES RESOURCE_LOCK snapling_xvfb TIMEOUT 180)
+    PROPERTIES RUN_SERIAL TRUE TIMEOUT 180)
   endif()
  endif()
 endif()

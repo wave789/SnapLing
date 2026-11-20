@@ -1,18 +1,21 @@
 #include "SelectionOverlay.h"
 #include "editor/AnnotationTools.h"
 #include "editor/Canvas.h"
+#include "ui/ToolIcons.h"
+#include <QActionGroup>
 #include <QApplication>
 #include <QClipboard>
 #include <QCloseEvent>
-#include <QComboBox>
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPushButton>
 #include <QResizeEvent>
-#include <QSignalBlocker>
 #include <QTimer>
 #include <QToolBar>
+#include <QToolButton>
+#include <QStyle>
+#include <QMenu>
 #include <QVBoxLayout>
 #include <QGuiApplication>
 #include <QKeyEvent>
@@ -118,8 +121,9 @@ void SelectionOverlay::paintEvent(QPaintEvent *) {
     painter.setClipPath(path());
     painter.drawImage(0, 0, frame.image);
     painter.restore();
-    painter.setPen(QPen(QColor("#60a5fa"), 1));
-    painter.drawRect(selectionGeometry());
+    painter.setPen(QPen(QColor("#0bd18b"), 2));
+    const auto selection = selectionGeometry();
+    painter.drawRect(QRectF(selection).adjusted(-1, -1, 1, 1));
     if (currentPhase == Phase::Selecting) {
         const QString hint = QString("%1 × %2 · 拖动框选后立即编辑 · Enter 高级编辑 · Esc 取消")
                                  .arg(qRound(selected.width())).arg(qRound(selected.height()));
@@ -315,48 +319,85 @@ void SelectionOverlay::beginQuickEditing() {
 void SelectionOverlay::createToolbar() {
     toolbar = new QFrame(this);
     toolbar->setObjectName("quickToolbar");
-    toolbar->setStyleSheet("QWidget{background:#f4f7fc;color:#18253b}"
-                          "QFrame#quickToolbar{background:#f4f7fc;border:1px solid #7993ba;border-radius:8px}"
-                          "QToolBar{border:0;spacing:2px;background:transparent}"
-                          "QToolButton{padding:5px;color:#18253b} QToolButton:checked{background:#c6ddff}");
+    toolbar->setStyleSheet("QWidget{background:#202328;color:#d3d9e1}"
+                          "QFrame#quickToolbar{border:1px solid #3d444e;border-radius:9px}"
+                          "QMenu{background:#202328;border:1px solid #4b5563;padding:5px}"
+                          "QMenu::item{padding:7px 20px} QMenu::item:selected{background:#34443f}");
     auto *layout = new QVBoxLayout(toolbar);
     layout->setContentsMargins(6, 6, 6, 6);
+    auto *row = new QBoxLayout(QBoxLayout::LeftToRight);
+    row->setObjectName("quickToolRow");
+    row->setSpacing(0);
+    layout->addLayout(row);
     auto *tools = new QToolBar(toolbar);
-    tools->setMovable(false);
-    addAnnotationTools(tools, canvas, false);
-    layout->addWidget(tools);
+    tools->setObjectName("quickAnnotationTools");
+    addAnnotationTools(tools, canvas, false, true);
+    row->addWidget(tools);
     auto *actions = new QToolBar(toolbar);
-    layout->addWidget(actions);
-    auto add = [&](QString name, auto callback) {
-        auto *action = actions->addAction(name);
+    actions->setObjectName("quickActionTools");
+    row->addWidget(actions);
+    auto add = [&](QString name, ToolIcon icon, auto callback) {
+        auto *action = actions->addAction(toolIcon(icon), name);
         connect(action, &QAction::triggered, this, callback);
         return action;
     };
-    auto *undo = add("撤销", [this] { editing->document.undo(); });
-    auto *redo = add("重做", [this] { editing->document.redo(); });
+    auto *undo = add("撤销", ToolIcon::Undo, [this] { editing->document.undo(); });
+    auto *redo = add("重做", ToolIcon::Redo, [this] { editing->document.redo(); });
     undo->setEnabled(false);
     redo->setEnabled(false);
-    add("OCR", [this] { runOcr(); });
-    add("AI 翻译", [this] { translate(); });
-    add("全选文字", [this] { canvas->selectAllText(); canvas->setFocus(); });
-    add("复制文字", [this] {
+    actions->addSeparator();
+    add("OCR", ToolIcon::Ocr, [this] { runOcr(); });
+    auto *translation = add("AI 翻译", ToolIcon::Translate, [this] { translate(); });
+    translation->setCheckable(true);
+    translation->setObjectName("translationToggle");
+    auto *translationButton = qobject_cast<QToolButton *>(actions->widgetForAction(translation));
+    translationButton->setObjectName("translationButton");
+    auto updateTranslation = [translation, translationButton](bool enabled) {
+        translation->setChecked(enabled);
+        translation->setToolTip(enabled ? "取消翻译，恢复原图" : "AI 翻译");
+        translationButton->setToolTip(translation->toolTip());
+        translationButton->setProperty("translationActive", enabled);
+        translationButton->style()->unpolish(translationButton);
+        translationButton->style()->polish(translationButton);
+        translationButton->update();
+    };
+    connect(editing.get(), &EditorSession::translationStateChanged, this, updateTranslation);
+    connect(translation, &QAction::triggered, this, [this, updateTranslation] {
+        updateTranslation(editing->isTranslationEnabled());
+    });
+    updateTranslation(editing->isTranslationEnabled());
+    add("全选文字", ToolIcon::SelectText, [this] { canvas->selectAllText(); canvas->setFocus(); });
+    add("复制文字", ToolIcon::CopyText, [this] {
         TextLayout text;
         text.setLines(editing->document.state().ocr);
         QApplication::clipboard()->setText(canvas->selectedText().isEmpty() ? text.all() : canvas->selectedText());
     });
-    add("复制译文", [this] { editing->copyTranslation(); });
-    add("复制图片", [this] { canvas->finishTextEdit(true); editing->copyImage(); });
-    add("保存", [this] { canvas->finishTextEdit(true); editing->requestSave(this); });
-    auto *cancelTask = add("取消任务", [this] { editing->cancel(); });
-    cancelTask->setEnabled(false);
-    auto *mode = new QComboBox(toolbar);
-    mode->addItems({"原文", "译文", "对照"});
-    actions->addWidget(mode);
-    connect(mode, qOverload<int>(&QComboBox::activated), this, [this](int index) {
-        editing->document.change([index](auto &state) { state.translationMode = index; });
-    });
-    add("✅", [this] { confirm(); })->setToolTip("进入高级编辑器（Enter）");
-    add("❌", [this] { close(); })->setToolTip("取消截图（Esc）");
+    add("复制译文", ToolIcon::CopyTranslation, [this] { editing->copyTranslation(); });
+    auto *mode = add("原文、译文、对照", ToolIcon::View, [] {});
+    auto *viewMenu = new QMenu(toolbar);
+    viewMenu->setObjectName("translationViewMenu");
+    auto *viewGroup = new QActionGroup(viewMenu);
+    const QStringList views{"原文", "译文", "对照"};
+    for (int index = 0; index < views.size(); ++index) {
+        auto *view = viewMenu->addAction(views[index]);
+        view->setCheckable(true);
+        view->setData(index);
+        viewGroup->addAction(view);
+        view->setChecked(index == editing->document.state().translationMode);
+        connect(view, &QAction::triggered, this, [this, index] {
+            editing->document.change([index](auto &state) { state.translationMode = index; });
+        });
+    }
+    mode->setMenu(viewMenu);
+    qobject_cast<QToolButton *>(actions->widgetForAction(mode))->setPopupMode(QToolButton::InstantPopup);
+    auto *cancelTask = add("取消任务", ToolIcon::Stop, [this] { editing->cancel(); });
+    cancelTask->setVisible(false);
+    actions->addSeparator();
+    add("复制图片", ToolIcon::Copy, [this] { canvas->finishTextEdit(true); editing->copyImage(); });
+    add("保存", ToolIcon::Save, [this] { canvas->finishTextEdit(true); editing->requestSave(this); });
+    add("❌", ToolIcon::Cancel, [this] { close(); })->setToolTip("取消截图（Esc）");
+    add("✅", ToolIcon::Confirm, [this] { confirm(); })->setToolTip("进入高级编辑器（Enter）");
+    configureIconToolbar(actions);
     originalPreview = new QLabel(toolbar);
     originalPreview->setPixmap(QPixmap::fromImage(editing->document.original().scaled(220, 120, Qt::KeepAspectRatio)));
     originalPreview->hide();
@@ -381,24 +422,38 @@ void SelectionOverlay::createToolbar() {
                 positionEditor();
             });
     connect(editing.get(), &EditorSession::taskChanged, this, [this, cancelTask, approval] {
-        cancelTask->setEnabled(editing->task() != EditorSession::Task::Idle || editing->awaitingApproval());
+        cancelTask->setVisible(editing->task() != EditorSession::Task::Idle || editing->awaitingApproval());
         approval->setVisible(editing->awaitingApproval());
         positionEditor();
     });
-    statusLabel = new QLabel("选区内可直接标注，Enter 或 ✅ 进入高级编辑器", toolbar);
+    statusLabel = new QLabel(toolbar);
     statusLabel->setWordWrap(true);
     layout->addWidget(statusLabel);
+    statusLabel->hide();
     connect(editing.get(), &EditorSession::statusChanged, this, [this](QString message, bool error) {
         statusLabel->setText(message);
-        statusLabel->setStyleSheet(error ? "color:#ad2334" : "color:#263e61");
+        statusLabel->setStyleSheet(error ? "color:#ff98a3" : "color:#c4cbd4");
+        statusLabel->show();
+        positionEditor();
+        if (!error)
+            QTimer::singleShot(5000, this, [this, message] {
+                if (statusLabel->text() == message && editing->task() == EditorSession::Task::Idle &&
+                    !editing->awaitingApproval()) {
+                    statusLabel->hide();
+                    positionEditor();
+                }
+            });
+    });
+    connect(canvas, &Canvas::status, this, [this](QString message) {
+        statusLabel->setText(message);
+        statusLabel->show();
         positionEditor();
     });
-    connect(canvas, &Canvas::status, statusLabel, &QLabel::setText);
-    connect(&editing->document, &Document::changed, this, [this, undo, redo, mode] {
+    connect(&editing->document, &Document::changed, this, [this, undo, redo, viewGroup] {
         undo->setEnabled(editing->document.canUndo());
         redo->setEnabled(editing->document.canRedo());
-        const QSignalBlocker blocker(mode);
-        mode->setCurrentIndex(editing->document.state().translationMode);
+        for (auto *view : viewGroup->actions())
+            view->setChecked(view->data().toInt() == editing->document.state().translationMode);
         originalPreview->setVisible(editing->document.state().translationMode == 2);
         positionEditor();
     });
@@ -408,8 +463,21 @@ void SelectionOverlay::positionEditor() {
         return;
     const auto selection = selectionGeometry();
     canvas->setGeometry(selection);
-    toolbar->setFixedWidth(qMax(1, qMin(width() - 16, 1120)));
+    auto *row = toolbar->findChild<QBoxLayout *>("quickToolRow");
+    auto *tools = toolbar->findChild<QToolBar *>("quickAnnotationTools");
+    auto *actions = toolbar->findChild<QToolBar *>("quickActionTools");
+    const int available = qMax(1, width() - 16);
+    const auto layoutMargins = toolbar->layout()->contentsMargins();
+    const auto frameMargins = toolbar->contentsMargins();
+    const int surround = layoutMargins.left() + layoutMargins.right() + frameMargins.left() + frameMargins.right() + 2;
+    tools->setMinimumWidth(qMin(tools->sizeHint().width(), qMax(1, available - surround)));
+    actions->setMinimumWidth(qMin(actions->sizeHint().width(), qMax(1, available - surround)));
+    const int combined = tools->sizeHint().width() + actions->sizeHint().width() + surround;
+    row->setDirection(combined <= available ? QBoxLayout::LeftToRight : QBoxLayout::TopToBottom);
+    const int desired = combined <= available ? combined : qMax(tools->sizeHint().width(), actions->sizeHint().width()) + surround;
+    toolbar->setFixedWidth(qMin(available, desired));
     toolbar->adjustSize();
+    toolbar->layout()->activate();
     const int x = qBound(8, selection.left(), qMax(8, width() - toolbar->width() - 8));
     int y = selection.bottom() + 8;
     if (y + toolbar->height() > height() - 8)
@@ -429,7 +497,7 @@ void SelectionOverlay::runOcr(bool thenTranslate) {
 }
 void SelectionOverlay::translate() {
     if (canvas)
-        editing->translate(canvas->selectedLines());
+        editing->toggleTranslation(canvas->selectedLines());
 }
 void SelectionOverlay::copy() {
     if (!canvas->selectedText().isEmpty())

@@ -6,6 +6,7 @@
 #include <QFile>
 #include <QFutureWatcher>
 #include <QMutex>
+#include <QPainter>
 #include <QStandardPaths>
 #include <QtConcurrent>
 #ifdef SNAPLING_HAVE_TESSERACT
@@ -14,6 +15,48 @@
 #include <tesseract/resultiterator.h>
 #endif
 namespace SnapLing {
+#ifdef SNAPLING_HAVE_TESSERACT
+struct OcrInput {
+    QImage pixels;
+    qreal scale = 1;
+    int border = 12;
+    QRectF sourceRect(int left, int top, int right, int bottom, QSize sourceSize) const {
+        return QRectF((left - border) / scale, (top - border) / scale,
+                      (right - left) / scale, (bottom - top) / scale)
+            .intersected(QRectF(QPointF(), sourceSize));
+    }
+};
+static OcrInput prepareScreenshot(const QImage &image) {
+    QImage opaque(image.size(), QImage::Format_RGB32);
+    opaque.fill(Qt::white);
+    {
+        QPainter painter(&opaque);
+        painter.drawImage(opaque.rect(), image);
+    }
+    auto gray = opaque.convertToFormat(QImage::Format_Grayscale8);
+    qint64 dark = 0, samples = 0;
+    for (int y = 0; y < gray.height(); y += 4)
+        for (int x = 0; x < gray.width(); x += 4) {
+            dark += gray.constScanLine(y)[x] < 128;
+            ++samples;
+        }
+    if (dark > samples * .6)
+        gray.invertPixels();
+    OcrInput input;
+    // 小字号界面放大后识别；限制工作图像大小，坐标统一映射回原图像素。
+    input.scale = qint64(image.width()) * image.height() <= 4 * 1024 * 1024 ? 2 : 1;
+    if (input.scale > 1)
+        gray = gray.scaled(gray.size() * 2, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+    input.pixels = QImage(gray.size() + QSize(input.border * 2, input.border * 2), QImage::Format_RGB32);
+    input.pixels.fill(Qt::white);
+    {
+        QPainter painter(&input.pixels);
+        painter.drawImage(input.border, input.border, gray);
+    }
+    input.pixels = input.pixels.convertToFormat(QImage::Format_Grayscale8);
+    return input;
+}
+#endif
 QString findTessdata() {
     QStringList paths{qEnvironmentVariable("TESSDATA_PREFIX"),
                       QCoreApplication::applicationDirPath() + "/../share/snapling/tessdata",
@@ -142,10 +185,12 @@ void TesseractOcr::recognize(QImage image, QString path, QString languages, bool
         }
         if (t->isCancelled())
             return r;
-        auto rgb = image.convertToFormat(QImage::Format_RGB888);
-        s->api->SetPageSegMode(tesseract::PSM_AUTO);
-        s->api->SetImage(rgb.constBits(), rgb.width(), rgb.height(), 3, int(rgb.bytesPerLine()));
-        s->api->SetSourceResolution(144);
+        const auto input = prepareScreenshot(image);
+        // 截图包含浮层、菜单和多列文字，不能按单张连续文档合并各窗口的文本行。
+        s->api->SetPageSegMode(tesseract::PSM_SPARSE_TEXT);
+        s->api->SetImage(input.pixels.constBits(), input.pixels.width(), input.pixels.height(), 1,
+                         int(input.pixels.bytesPerLine()));
+        s->api->SetSourceResolution(qRound(144 * input.scale));
         tesseract::ETEXT_DESC monitor;
         monitor.cancel_this = t.get();
         monitor.cancel = [](void *p, int) { return static_cast<CancelToken *>(p)->isCancelled(); };
@@ -161,31 +206,57 @@ void TesseractOcr::recognize(QImage image, QString path, QString languages, bool
         }
         std::unique_ptr<tesseract::ResultIterator> it(s->api->GetIterator());
         int order = 0, paragraph = -1;
+        OcrLine run;
+        QRectF previousWord;
+        double confidenceSum = 0;
+        int characters = 0;
+        auto flush = [&] {
+            if (!run.text.isEmpty()) {
+                run.id = QString("line_%1").arg(order);
+                run.order = order++;
+                run.polygon = QPolygonF(run.box);
+                run.confidence = confidenceSum / qMax(1, characters);
+                r.lines << run;
+            }
+            run = {};
+            previousWord = {};
+            confidenceSum = 0;
+            characters = 0;
+        };
         if (it)
             do {
                 if (t->isCancelled())
                     break;
+                if (it->IsAtBeginningOf(tesseract::RIL_TEXTLINE))
+                    flush();
                 if (it->IsAtBeginningOf(tesseract::RIL_PARA))
                     ++paragraph;
-                std::unique_ptr<char[]> text(it->GetUTF8Text(tesseract::RIL_TEXTLINE));
+                std::unique_ptr<char[]> text(it->GetUTF8Text(tesseract::RIL_WORD));
                 int x1 = 0, y1 = 0, x2 = 0, y2 = 0;
-                if (!text || !it->BoundingBox(tesseract::RIL_TEXTLINE, &x1, &y1, &x2, &y2))
+                if (!text || !it->BoundingBox(tesseract::RIL_WORD, &x1, &y1, &x2, &y2))
                     continue;
-                QString value = QString::fromUtf8(text.get());
-                while (value.endsWith('\n') || value.endsWith('\r'))
-                    value.chop(1);
-                if (value.trimmed().isEmpty())
+                const auto value = QString::fromUtf8(text.get()).trimmed();
+                const auto box = input.sourceRect(x1, y1, x2, y2, image.size());
+                if (value.isEmpty() || box.isEmpty())
                     continue;
-                OcrLine line;
-                line.id = QString("line_%1").arg(order);
-                line.text = value;
-                line.box = QRectF(x1, y1, x2 - x1, y2 - y1);
-                line.polygon = QPolygonF(line.box);
-                line.confidence = it->Confidence(tesseract::RIL_TEXTLINE) / 100.;
-                line.order = order++;
-                line.paragraph = qMax(0, paragraph);
-                r.lines << line;
-            } while (it->Next(tesseract::RIL_TEXTLINE));
+                if (!previousWord.isEmpty()) {
+                    const auto gap = qMax(box.left() - previousWord.right(), previousWord.left() - box.right());
+                    const auto height = qMax(box.height(), previousWord.height());
+                    if (gap > qMax(16., height * 2.5) ||
+                        qAbs(box.center().y() - previousWord.center().y()) > height)
+                        flush();
+                }
+                if (!run.text.isEmpty() && it->BlanksBeforeWord() > 0 &&
+                    !(run.text.back().script() == QChar::Script_Han && value.front().script() == QChar::Script_Han))
+                    run.text += QString(qMin(8, it->BlanksBeforeWord()), ' ');
+                run.text += value;
+                run.box = run.box.united(box);
+                run.paragraph = qMax(0, paragraph);
+                confidenceSum += it->Confidence(tesseract::RIL_WORD) / 100. * value.size();
+                characters += value.size();
+                previousWord = box;
+            } while (it->Next(tesseract::RIL_WORD));
+        flush();
         s->api->Clear();
         if (!cache)
             s->api.reset();

@@ -11,6 +11,7 @@
 #include <QJsonDocument>
 #include <QImageReader>
 #include <QMessageBox>
+#include <QMenu>
 #include <QProcess>
 #include <QSignalSpy>
 #include <QScreen>
@@ -263,11 +264,93 @@ class TestQuickEdit : public QObject {
         QVERIFY(document.render() != document.original());
         click("复制译文");
         QVERIFY(QApplication::clipboard()->text().contains("你好世界"));
-        auto *mode = overlay->findChild<QFrame *>("quickToolbar")->findChild<QComboBox *>();
+        auto *mode = overlay->findChild<QMenu *>("translationViewMenu");
         QVERIFY(mode);
-        mode->setCurrentIndex(2);
-        QMetaObject::invokeMethod(mode, "activated", Q_ARG(int, 2));
+        mode->actions().at(2)->trigger();
         QCOMPARE(document.state().translationMode, 2);
+    }
+    void iconToolbarAndTranslationToggle() {
+        capture({20, 250, 760, 80});
+        QVERIFY(overlay);
+        auto *toolbar = overlay->findChild<QFrame *>("quickToolbar");
+        for (auto *button : toolbar->findChildren<QToolButton *>())
+            if (button->defaultAction() && button->defaultAction()->text() != "取消任务" &&
+                (button->parentWidget()->objectName() == "quickAnnotationTools" ||
+                 button->parentWidget()->objectName() == "quickActionTools")) {
+                QVERIFY2(button->isVisible(), qPrintable(button->defaultAction()->text()));
+                QVERIFY(!button->icon().isNull());
+                QCOMPARE(button->toolButtonStyle(), Qt::ToolButtonIconOnly);
+                QVERIFY(!button->toolTip().isEmpty());
+                QVERIFY(!button->accessibleName().isEmpty());
+                QVERIFY2(toolbar->rect().contains(QRect(button->mapTo(toolbar, QPoint(0, 0)), button->size())),
+                         qPrintable(button->accessibleName()));
+            }
+        QVERIFY(toolbar->grab().save(QCoreApplication::applicationDirPath() + "/icon-toolbar.png"));
+        auto *button = toolbar->findChild<QToolButton *>("translationButton");
+        QVERIFY(button);
+        const auto inactive = button->grab().toImage();
+        draw("箭头", {20, 10}, {100, 20});
+        auto session = overlay->session();
+        const auto annotated = session->document.render();
+        delay = 400;
+        click("AI 翻译");
+        QVERIFY(button->property("translationActive").toBool());
+        QVERIFY(button->isChecked());
+        const auto active = button->grab().toImage();
+        QVERIFY(active != inactive);
+        int green = 0;
+        for (int y = 0; y < active.height(); ++y)
+            for (int x = 0; x < active.width(); ++x) {
+                const auto color = active.pixelColor(x, y);
+                green += color.green() > 120 && color.red() < 40 && color.blue() < color.green();
+            }
+        QVERIFY(green > 100);
+        QTRY_COMPARE_WITH_TIMEOUT(requests, 1, 10000);
+        click("AI 翻译");
+        QVERIFY(!button->property("translationActive").toBool());
+        QVERIFY(!button->isChecked());
+        QTest::qWait(500);
+        QVERIFY(session->document.state().translations.isEmpty());
+        QCOMPARE(session->document.render(), annotated);
+        delay = 0;
+        click("AI 翻译");
+        waitForTranslation();
+        QCOMPARE(requests, 2);
+        QVERIFY(button->isChecked());
+        const auto translated = session->document.render();
+        click("AI 翻译");
+        QCOMPARE(session->document.state().translationMode, 0);
+        QCOMPARE(session->document.render(), annotated);
+        QVERIFY(!session->document.state().translations.isEmpty());
+        click("AI 翻译");
+        QCOMPARE(requests, 2);
+        QCOMPARE(session->document.render(), translated);
+        QVERIFY(button->isChecked());
+        click("✅");
+        QTRY_COMPARE(windows<EditorWindow>().size(), 1);
+        auto *advanced = windows<EditorWindow>().first()->findChild<QToolButton *>("translationButton");
+        QVERIFY(advanced && advanced->isChecked());
+        QVERIFY(advanced->property("translationActive").toBool());
+        QTest::mouseClick(advanced, Qt::LeftButton);
+        QVERIFY(!advanced->isChecked());
+        QCOMPARE(session->document.render(), annotated);
+    }
+    void cancelTranslationDuringOcr() {
+        capture({20, 250, 760, 80});
+        QVERIFY(overlay);
+        click("AI 翻译");
+        QCOMPARE(overlay->session()->task(), EditorSession::Task::Ocr);
+        click("AI 翻译");
+        QVERIFY(!overlay->session()->isTranslationEnabled());
+        if (overlay->session()->task() == EditorSession::Task::Ocr) {
+            click("AI 翻译");
+            QVERIFY(!overlay->session()->isTranslationEnabled());
+            QVERIFY(!overlay->findChild<QToolButton *>("translationButton")->isChecked());
+        }
+        QTRY_COMPARE_WITH_TIMEOUT(overlay->session()->task(), EditorSession::Task::Idle, 10000);
+        QCOMPARE(requests, 0);
+        QVERIFY(overlay->session()->document.state().translations.isEmpty());
+        QCOMPARE(overlay->session()->document.state().translationMode, 0);
     }
     void advancedHandoff() {
         capture();

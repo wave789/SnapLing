@@ -172,7 +172,7 @@ bool Document::exportImage(QString path, QString &error, QColor bg, int quality)
     timer.start();
     if (current.translationMode != 0)
         for (const auto &u : current.translations) {
-            if (u.status == "done" && fitTranslation(u.target, u.box, source.size(), u.fontSize).overflow) {
+            if (rendersTranslation(u) && fitTranslation(u.target, u.box, source.size(), u.fontSize).overflow) {
                 error = "部分译文无法完整放入图像。请使用“调整译文”修改区域或字号，或保存工程保留完整文本。";
                 return false;
             }
