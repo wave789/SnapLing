@@ -119,9 +119,10 @@ Application::Application(QObject *p, std::unique_ptr<ICaptureBackend> captureBac
     add("设置", [this] { settingsDialog(); });
     layout->addLayout(second);
     status = new QLabel;
+    status->setObjectName("captureStatus");
     status->setWordWrap(true);
     status->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    layout->addWidget(status);
+    layout->insertWidget(2, status);
     hotkeyStatus = new QLabel;
     hotkeyStatus->setWordWrap(true);
     hotkeyStatus->setTextInteractionFlags(Qt::TextSelectableByMouse);
@@ -187,7 +188,9 @@ Application::Application(QObject *p, std::unique_ptr<ICaptureBackend> captureBac
         showCaptureOverlays(std::move(frame));
     });
     connect(backend.get(), &ICaptureBackend::failed, this, [this](QString e) {
+        qWarning("capture_failed stage=%s reason=%s", captureOverlays.isEmpty() ? "capture" : "editing", qPrintable(e));
         status->setText(e);
+        status->setStyleSheet("QLabel{color:#d62f36;border:1px solid #d62f36;padding:10px;}");
         // 已冻结的截图与共享流独立；共享中断不能丢弃正在编辑的文档。
         if (!captureOverlays.isEmpty())
             return;
@@ -196,6 +199,8 @@ Application::Application(QObject *p, std::unique_ptr<ICaptureBackend> captureBac
         preparing = false;
         restoreWindows();
         show();
+        if (tray.isVisible())
+            tray.showMessage("截图失败", e, QSystemTrayIcon::Warning, 8000);
     });
     connect(hotkey.get(), &IHotkeyBackend::activated, this, [this] { capture(); });
     connect(hotkey.get(), &IHotkeyBackend::activationTokenAvailable, this,
@@ -258,9 +263,23 @@ void Application::bindHotkeys() {
     }
 }
 void Application::show() {
+    // 命令启动和截图失败后也需要激活主窗口；此前 token 只用于截图遮罩。
+    const auto token = captureActivationToken;
+    captureActivationToken.clear();
+    const auto previous = qgetenv("XDG_ACTIVATION_TOKEN");
+    if (!token.isEmpty())
+        qputenv("XDG_ACTIVATION_TOKEN", token.toUtf8());
+    if (main.isMinimized())
+        main.setWindowState(main.windowState() & ~Qt::WindowMinimized);
     main.show();
     main.raise();
     main.activateWindow();
+    if (!token.isEmpty()) {
+        if (previous.isNull())
+            qunsetenv("XDG_ACTIVATION_TOKEN");
+        else
+            qputenv("XDG_ACTIVATION_TOKEN", previous);
+    }
 }
 bool Application::eventFilter(QObject *o, QEvent *e) {
     if (o == &main && e->type() == QEvent::Close && settings.value("general/background", true).toBool()) {
@@ -298,6 +317,8 @@ void Application::capture(CaptureMode mode, bool ocr, bool translate, int delay)
         return;
     }
     preparing = true;
+    status->setStyleSheet({});
+    status->setText("正在获取桌面截图… 如系统显示截图授权窗口，请完成授权。");
     captureTimer.start();
     pendingMode = mode;
     pendingOcr = ocr;

@@ -185,3 +185,9 @@ ScreenCast 测试使用独立 D-Bus 会话的 Portal 替身和受控帧源，覆
 可保留审阅的日志摘要见 [本轮记录](validation/2026-11-20-instant-capture.txt)。本地完整日志为 `build/instant-capture-final-ctest.log`、`build/wayland-three-output-native.log`；独立兼容构建记录在 `/tmp/snapling-no-pipewire/Testing/Temporary/LastTest.log`。
 
 **未验证：**真实 GNOME 的单次截图权限存储和 PNG 返回、用户笔记本加两块外接屏同时播放视频、物理鼠标与快捷键、实际混合 DPI、系统 Portal NoReply 的根本原因和长时间性能。不能宣称已在用户的 Ubuntu 26.04.1 三屏环境完成验收。首次系统截图授权仍可能出现；取图有系统 API 延迟。当前区域仍限于一块屏幕内。
+
+### 后续：截图失败无提示
+
+用户反馈快捷键已注册、重复输出 `capture_backend=screenshot`，没有图像完成记录，且启动时鼠标转圈约 15 秒后没有可见反馈。该日志不足以判断权限、服务、文件读取或布局匹配的具体原因；没有把它认定为已解决的系统权限问题。
+
+增加 Screenshot Portal 响应码、是否返回 URI、PNG 尺寸、映射桌面尺寸和失败原因日志（不记录图像路径或内容）。错误置于主界面顶部并突出显示；存在托盘时发送失败通知。主窗口恢复最小化状态，命令启动及失败回到主界面也传递激活 token。测试覆盖 Portal 取消、通用失败、布局不匹配、最小化窗口恢复、无隐式共享和失败后重试成功。Release 构建、capture_flow 和 portal_hotkey 回归通过；用户实际失败的原因仍需新的日志确认。

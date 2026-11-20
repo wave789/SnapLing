@@ -129,8 +129,10 @@ void WaylandCapture::portalCapture() {
         if (job != generation)
             return;
         request = nullptr;
+        qInfo("portal_screenshot_response code=%u has_uri=%d", code, data.contains("uri"));
         if (code) {
-            failSharing(error.isEmpty() ? "系统截图已取消或被拒绝。请检查系统隐私设置中的截图权限。"
+            failSharing(error.isEmpty() ? (code == 1 ? "系统截图授权已取消（Portal 响应码 1）。"
+                : QString("系统未提供截图（Portal 响应码 %1）。可能是截图权限被拒绝或桌面截图服务出错。若曾拒绝授权，系统可能直接拒绝后续请求而不再弹窗。").arg(code))
                                          : "系统截图失败：" + error);
             return;
         }
@@ -139,13 +141,16 @@ void WaylandCapture::portalCapture() {
             failSharing("系统未返回有效的本地截图文件");
             return;
         }
-        struct Result { CaptureFrame frame; QString error; };
+        struct Result { CaptureFrame frame; QString error; QSize pixels; QRectF desktop; };
         auto *watcher = new QFutureWatcher<Result>(this);
         connect(watcher, &QFutureWatcher<Result>::finished, this, [this, watcher, job] {
             auto result = watcher->result();
             watcher->deleteLater();
             if (job != generation)
                 return;
+            qInfo("portal_screenshot_pixels=%dx%d desktop=%.0f,%.0f,%.0fx%.0f",
+                  result.pixels.width(), result.pixels.height(), result.desktop.x(), result.desktop.y(),
+                  result.desktop.width(), result.desktop.height());
             if (!sameLayout(layout, currentScreens())) {
                 failSharing("截图期间显示器布局已改变，请重新截图。");
                 return;
@@ -163,6 +168,7 @@ void WaylandCapture::portalCapture() {
             Result result;
             QImageReader reader(path);
             const auto size = reader.size();
+            result.pixels = size;
             if (size.isEmpty() || qint64(size.width()) * size.height() > 100000000) {
                 result.error = "系统截图尺寸无效或超过 1 亿像素限制";
                 return result;
@@ -182,6 +188,7 @@ void WaylandCapture::portalCapture() {
                 }
                 atlas.desktop = atlas.desktop.united(screen.desktop);
             }
+            result.desktop = atlas.desktop;
             // Mutter 的桌面截图使用统一的 stage 像素比例，不能把主屏图像误认为完整桌面。
             const qreal scale = image.width() / atlas.desktop.width();
             if (!qIsFinite(scale) || qAbs(image.height() - atlas.desktop.height() * scale) > 2) {
@@ -526,6 +533,7 @@ void WaylandCapture::stopSharing() {
         emit failed("已停止屏幕访问，截图已取消。");
 }
 void WaylandCapture::failSharing(QString error) {
+    qWarning("capture_failed backend=wayland reason=%s", qPrintable(error));
     resetSharing();
     emit failed(error);
 }

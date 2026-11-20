@@ -775,6 +775,43 @@ class TestCaptureFlow : public QObject {
         QTRY_COMPARE(frames.size(), 1);
         QCOMPARE(screenshot.requests, (QList<bool>{false, false}));
     }
+    void captureFailuresAreVisibleAndRetryable_data() {
+        QTest::addColumn<int>("code");
+        QTest::addColumn<bool>("badLayout");
+        QTest::addColumn<QString>("message");
+        QTest::newRow("denied-or-service-error") << 2 << false << "响应码 2";
+        QTest::newRow("cancelled") << 1 << false << "响应码 1";
+        QTest::newRow("wrong-layout") << 0 << true << "不匹配";
+    }
+    void captureFailuresAreVisibleAndRetryable() {
+        QFETCH(int, code);
+        QFETCH(bool, badLayout);
+        QFETCH(QString, message);
+        const auto originalLayout = testLayout;
+        screenshot.code = uint(code);
+        if (badLayout)
+            testLayout << CaptureScreen{"external", {800, 0, 800, 600}, {}};
+        Application app(nullptr, backend(false));
+        auto *main = windows<QMainWindow>().first();
+        main->showMinimized();
+        app.command({"--capture"});
+        auto *status = main->findChild<QLabel *>("captureStatus");
+        QVERIFY(status);
+        QTRY_VERIFY(status->text().contains(message));
+        QVERIFY(main->isVisible());
+        QVERIFY(!main->isMinimized());
+        QVERIFY(status->isVisible());
+        QVERIFY(!status->styleSheet().isEmpty());
+        QVERIFY(windows<SelectionOverlay>().isEmpty());
+        QCOMPARE(screenCast.created, 0);
+        QCOMPARE(screenshot.requests.size(), 1);
+        screenshot.code = 0;
+        testLayout = originalLayout;
+        app.command({"--capture"});
+        QTRY_COMPARE(windows<SelectionOverlay>().size(), 1);
+        QVERIFY(status->styleSheet().isEmpty());
+        QCOMPARE(screenshot.requests.size(), 2);
+    }
     void oneShotRejectsWrongDesktopSize() {
         testLayout << CaptureScreen{"external", {800, 0, 800, 600}, {}};
         auto capture = backend(false);
