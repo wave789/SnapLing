@@ -25,12 +25,20 @@ struct WindowInfo {
     QString title;
     quintptr id = 0;
 };
+struct CaptureScreen {
+    QString name;
+    QRectF desktop; // 此屏幕在全局逻辑坐标中的矩形。
+    QImage image;   // 此屏幕的原生像素，独立保留以免即时编辑时重采样。
+    qreal devicePixelRatio = 1;
+};
 struct CaptureFrame {
     QImage image;
     QRectF desktop; // 全局逻辑坐标，像素/逻辑比例按实际图像计算。
     QVector<WindowInfo> windows;
+    QVector<CaptureScreen> screens;
+    QString screenName;
     qint64 captureMs = 0;
-    bool selectionComplete = false; // 系统交互式截图已完成区域或窗口选择。
+    bool selectionComplete = false; // 已有完整选区；多屏全屏图也用此标记按比例预览。
     QPointF toPixel(QPointF global) const;
     QRect pixelRect(QRectF global) const;
 };

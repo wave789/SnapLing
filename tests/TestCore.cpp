@@ -1,4 +1,5 @@
 #include "core/Types.h"
+#include "capture/CaptureService.h"
 #include "editor/Document.h"
 #include "history/HistoryStore.h"
 #include "image/ImageProcessor.h"
@@ -77,6 +78,48 @@ class TestCore : public QObject {
             QCOMPARE(f.toPixel({0, 350}), QPointF(400 * scale, 300 * scale));
             QCOMPARE(f.pixelRect({-400, 50, 20, 30}).size(), QSize(qRound(20 * scale), qRound(30 * scale)));
         }
+    }
+    void mixedDpiScreenComposition() {
+        QVector<CaptureScreen> screens{{"left", {-100, 0, 100, 60}, {}, 1},
+                                       {"internal", {0, 0, 80, 50}, {}, 1.5},
+                                       {"right", {80, -20, 60, 50}, {}, 2}};
+        const QList<QColor> colors{Qt::red, Qt::green, Qt::blue};
+        for (int i = 0; i < screens.size(); ++i) {
+            screens[i].image = QImage((screens[i].desktop.size() * screens[i].devicePixelRatio).toSize(), QImage::Format_RGB32);
+            screens[i].image.fill(colors[i]);
+        }
+        QString error;
+        const auto frame = combineCaptureScreens(screens, error);
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(frame.desktop, QRectF(-100, -20, 240, 80));
+        QCOMPARE(frame.image.size(), QSize(480, 160));
+        QCOMPARE(frame.screens.size(), 3);
+        for (int i = 0; i < screens.size(); ++i) {
+            QCOMPARE(frame.screens[i].image, screens[i].image);
+            QCOMPARE(frame.image.pixelColor(frame.toPixel(screens[i].desktop.center()).toPoint()), colors[i]);
+        }
+        QCOMPARE(frame.image.pixelColor(frame.toPixel({-90, -10}).toPoint()).alpha(), 0);
+    }
+    void singleScreenPreservesNativePixels() {
+        QImage image(300, 180, QImage::Format_RGB32);
+        image.fill(Qt::cyan);
+        image.setPixelColor(23, 37, Qt::red);
+        QString error;
+        const auto frame = combineCaptureScreens({{"external", {-200, 50, 150, 90}, image, 2}}, error);
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(frame.image, image);
+        QCOMPARE(frame.screenName, QString("external"));
+        QCOMPARE(frame.toPixel({-188.5, 68.5}), QPointF(23, 37));
+    }
+    void invalidScreenCompositionIsRejected() {
+        QString error;
+        QVERIFY(combineCaptureScreens({}, error).image.isNull());
+        QVERIFY(!error.isEmpty());
+        QVERIFY(combineCaptureScreens({{"empty", {0, 0, 100, 100}, {}}}, error).image.isNull());
+        QVERIFY(!error.isEmpty());
+        QImage image(1, 1, QImage::Format_RGB32);
+        QVERIFY(combineCaptureScreens({{"huge", {0, 0, 20000, 20000}, image}}, error).image.isNull());
+        QVERIFY(error.contains("像素限制"));
     }
     void polygonMask() {
         auto image = sample();

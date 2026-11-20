@@ -19,6 +19,7 @@ class SelectionOverlay final : public QWidget {
     Phase phase() const { return currentPhase; }
     Canvas *canvasWidget() const { return canvas; }
     std::shared_ptr<EditorSession> session() const { return editing; }
+    QString captureScreenName() const { return frame.screenName; }
     void runOcr(bool thenTranslate = false);
     void translate();
     QRectF selection() const {

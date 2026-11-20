@@ -13,6 +13,7 @@
 namespace SnapLing {
 class EditorWindow;
 class EditorSession;
+class SelectionOverlay;
 class Application final : public QObject {
     Q_OBJECT
   public:
@@ -29,6 +30,9 @@ class Application final : public QObject {
                  int delay = 0);
     void beginCapture();
     void restoreWindows();
+    void showCaptureOverlays(CaptureFrame frame);
+    void closeCaptureOverlays(SelectionOverlay *except = nullptr);
+    QList<QPointer<SelectionOverlay>> captureOverlays;
     QList<QPointer<QWidget>> hiddenWindows;
     bool preparing = false;
     void edit(QImage image, bool ocr = false, bool translate = false);

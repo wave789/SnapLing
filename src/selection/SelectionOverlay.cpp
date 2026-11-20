@@ -48,7 +48,15 @@ SelectionOverlay::SelectionOverlay(CaptureFrame f, CaptureMode m, QWidget *paren
     setCursor(Qt::CrossCursor);
     setFocusPolicy(Qt::StrongFocus);
     if (QGuiApplication::platformName().contains("wayland")) {
-        auto *screen = QGuiApplication::screenAt(frame.desktop.center().toPoint());
+        QScreen *screen = nullptr;
+        if (!frame.screenName.isEmpty())
+            for (auto *candidate : QGuiApplication::screens())
+                if (candidate->name() == frame.screenName) {
+                    screen = candidate;
+                    break;
+                }
+        if (!screen)
+            screen = QGuiApplication::screenAt(frame.desktop.center().toPoint());
         if (!screen)
             screen = QGuiApplication::primaryScreen();
         setScreen(screen);

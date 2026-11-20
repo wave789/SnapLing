@@ -2,7 +2,7 @@
 
 - [Screenshot Portal](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.Screenshot.html)：非交互式请求与异步 URI 结果，用于未启用 PipeWire 的构建。
 - [Request 协议](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.Request.html)：handle_token、预先订阅 Response、Close。
-- [ScreenCast Portal](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.ScreenCast.html)：单显示器会话、position/size、persist_mode、单次 restore token、PipeWire FD。
+- [ScreenCast Portal](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.ScreenCast.html)：multiple、多路 streams、position/size、persist_mode、单次 restore token、PipeWire FD。
 - [GlobalShortcuts](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.GlobalShortcuts.html)：创建会话、绑定 action、Activated。
 - [PipeWire 视频采集](https://docs.pipewire.org/page_tutorial5.html)：格式协商、dequeue/queue 缓冲区与流生命周期。
 - [PipeWire pw_stream_connect](https://docs.pipewire.org/group__pw__stream.html)：节点 ID 与 target.object 序列号的连接方式、STREAMING 状态。
@@ -11,3 +11,4 @@
 - [Win32 GetDIBits](https://learn.microsoft.com/en-us/windows/win32/api/wingdi/nf-wingdi-getdibits)：读取前将 bitmap 从 DC 中解除选中。
 - [Qt QScreen](https://doc.qt.io/qt-6/qscreen.html)：逻辑几何与像素比例的区别。
 - [GNOME Portal 实现](https://gitlab.gnome.org/GNOME/xdg-desktop-portal-gnome)：交互式截图由 Shell 提供，不能绕过授权。
+- [GNOME 多屏来源选择](https://github.com/GNOME/xdg-desktop-portal-gnome/blob/main/src/screencastwidget.c) 与 [流元数据](https://github.com/GNOME/xdg-desktop-portal-gnome/blob/main/src/gnomescreencast.c)：多选授权、每路 position/size 和不透明来源 ID。

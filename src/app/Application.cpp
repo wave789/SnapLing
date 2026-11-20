@@ -54,14 +54,22 @@ Application::Application(QObject *p, std::unique_ptr<ICaptureBackend> captureBac
     modeBox->addItems({"矩形区域", "全屏", "窗口", "椭圆", "多边形", "自由曲线"});
     row->addWidget(modeBox);
     screenBox = new QComboBox;
+    screenBox->setObjectName("captureScreenSelector");
     auto refreshScreens = [this] {
         auto selected = screenBox->currentText();
+        const auto name = screenBox->currentData(Qt::UserRole + 1).toString();
         screenBox->clear();
+        screenBox->addItem("整个桌面（全部屏幕）", -1);
         screenBox->addItem("主屏幕", -2);
-        screenBox->addItem("整个桌面", -1);
-        for (int i = 0; i < QGuiApplication::screens().size(); ++i)
-            screenBox->addItem(QGuiApplication::screens()[i]->name(), i);
-        int index = screenBox->findText(selected);
+        const auto screens = QGuiApplication::screens();
+        for (int i = 0; i < screens.size(); ++i) {
+            const auto *screen = screens[i];
+            screenBox->addItem(QString("%1 · %2×%3 · %4%")
+                                  .arg(screen->name()).arg(screen->size().width()).arg(screen->size().height())
+                                  .arg(qRound(screen->devicePixelRatio() * 100)), i);
+            screenBox->setItemData(screenBox->count() - 1, screen->name(), Qt::UserRole + 1);
+        }
+        int index = name.isEmpty() ? screenBox->findText(selected) : screenBox->findData(name, Qt::UserRole + 1);
         if (index >= 0)
             screenBox->setCurrentIndex(index);
     };
@@ -123,10 +131,24 @@ Application::Application(QObject *p, std::unique_ptr<ICaptureBackend> captureBac
     if (auto *wayland = qobject_cast<WaylandCapture *>(backend.get())) {
         capabilities->setText(capabilities->text() + "\n" + wayland->capabilities());
         auto *share = new QPushButton("开启 / 停止授权快速截图");
-        layout->addWidget(share);
+        auto *sharingButtons = new QHBoxLayout;
+        sharingButtons->addWidget(share);
+        auto *reselect = new QPushButton("重新选择共享屏幕…");
+        reselect->setToolTip("重新授权需要截图的内置和外接屏幕；选择整个桌面时请勾选全部显示器。");
+        sharingButtons->addWidget(reselect);
+        layout->addLayout(sharingButtons);
         connect(share, &QPushButton::clicked, this, &Application::sharing);
+        connect(reselect, &QPushButton::clicked, this, [this, wayland] {
+            if (capturing || preparing || countdown) {
+                status->setText("请先完成或取消当前截图，再重新选择共享屏幕。");
+                return;
+            }
+            wayland->resetScreenSelection();
+            sharingLabel->setText("请在系统授权窗口勾选需要的内置和外接屏幕。");
+            capture(CaptureMode(modeBox->currentIndex()));
+        });
         connect(wayland, &WaylandCapture::sharingChanged, this, [this](bool active) {
-            sharingLabel->setText(active ? "● 正在共享屏幕，仅缓存最新一帧。点击上方按钮可立即停止。"
+            sharingLabel->setText(active ? "● 正在共享已授权屏幕，各缓存最新一帧。可停止共享或重新选择屏幕。"
                                          : "屏幕共享已停止");
         });
     }
@@ -148,27 +170,15 @@ Application::Application(QObject *p, std::unique_ptr<ICaptureBackend> captureBac
         qInfo("capture_ms=%lld trigger_to_pixels_ms=%lld", frame.captureMs, captureTimer.elapsed());
         if (pendingMode == CaptureMode::Window && !backend->hasWindowPicking())
             status->setText("在 SnapLing 选区中框选窗口内容，松开鼠标后即可标注。");
-        auto session = std::make_shared<EditorSession>(QImage(), settings, config);
-        auto *overlay = new SelectionOverlay(std::move(frame), pendingMode, nullptr, session);
-        connect(overlay, &SelectionOverlay::advancedRequested, this, [this](auto session) {
-            capturing = false;
-            restoreWindows();
-            edit(std::move(session));
-        });
-        connect(overlay, &SelectionOverlay::quickEditingStarted, this, [this, overlay] {
-            if (pendingOcr || pendingTranslation)
-                overlay->runOcr(pendingTranslation);
-        });
-        connect(overlay, &SelectionOverlay::cancelled, this, [this] {
-            capturing = false;
-            restoreWindows();
-        });
-        connect(overlay, &SelectionOverlay::ready, this,
-                [this] { qInfo("trigger_to_selection_ms=%lld", captureTimer.elapsed()); });
+        showCaptureOverlays(std::move(frame));
     });
     connect(backend.get(), &ICaptureBackend::failed, this, [this](QString e) {
-        capturing = false;
         status->setText(e);
+        // 已冻结的截图与共享流独立；共享中断不能丢弃正在编辑的文档。
+        if (!captureOverlays.isEmpty())
+            return;
+        capturing = false;
+        closeCaptureOverlays();
         preparing = false;
         restoreWindows();
         show();
@@ -196,6 +206,7 @@ Application::Application(QObject *p, std::unique_ptr<ICaptureBackend> captureBac
 }
 Application::~Application() {
     backend->cancel();
+    closeCaptureOverlays();
     hotkey->unbind();
     QList<QWidget *> editors;
     for (auto *w : QApplication::topLevelWidgets())
@@ -314,6 +325,74 @@ void Application::restoreWindows() {
     for (auto w : windows)
         if (w)
             w->show();
+}
+void Application::closeCaptureOverlays(SelectionOverlay *except) {
+    const auto overlays = captureOverlays;
+    captureOverlays.clear();
+    for (auto overlay : overlays)
+        if (overlay) {
+            if (overlay == except)
+                captureOverlays << overlay;
+            else {
+                disconnect(overlay, nullptr, this, nullptr);
+                overlay->close();
+            }
+        }
+}
+void Application::showCaptureOverlays(CaptureFrame frame) {
+    QVector<CaptureFrame> views;
+    if (frame.screens.size() > 1 && pendingMode != CaptureMode::FullScreen) {
+        for (const auto &screen : frame.screens) {
+            CaptureFrame view;
+            view.image = screen.image;
+            view.desktop = screen.desktop;
+            view.screenName = screen.name;
+            views << std::move(view);
+        }
+    } else {
+        if (pendingMode == CaptureMode::FullScreen && frame.screens.size() > 1)
+            frame.selectionComplete = true;
+        views << std::move(frame);
+    }
+    // Wayland 上每个输出单独创建全屏 surface，避免把整幅桌面缩到主屏。
+    if (QGuiApplication::platformName().contains("wayland"))
+        for (const auto &view : views) {
+            bool found = false;
+            for (auto *screen : QGuiApplication::screens())
+                found |= screen->name() == view.screenName || screen->geometry().contains(view.desktop.center().toPoint());
+            if (!found) {
+                capturing = false;
+                restoreWindows();
+                status->setText("无法匹配截图所在显示器，请检查屏幕连接并重新选择共享屏幕。");
+                show();
+                return;
+            }
+        }
+    for (auto &view : views) {
+        auto session = std::make_shared<EditorSession>(QImage(), settings, config);
+        auto *overlay = new SelectionOverlay(std::move(view), pendingMode, nullptr, session);
+        captureOverlays << overlay;
+        connect(overlay, &SelectionOverlay::advancedRequested, this, [this, overlay](auto session) {
+            closeCaptureOverlays(overlay);
+            captureOverlays.clear();
+            capturing = false;
+            restoreWindows();
+            edit(std::move(session));
+        });
+        connect(overlay, &SelectionOverlay::quickEditingStarted, this, [this, overlay] {
+            closeCaptureOverlays(overlay);
+            if (pendingOcr || pendingTranslation)
+                overlay->runOcr(pendingTranslation);
+        });
+        connect(overlay, &SelectionOverlay::cancelled, this, [this, overlay] {
+            closeCaptureOverlays(overlay);
+            captureOverlays.clear();
+            capturing = false;
+            restoreWindows();
+        });
+        connect(overlay, &SelectionOverlay::ready, this,
+                [this] { qInfo("trigger_to_selection_ms=%lld", captureTimer.elapsed()); });
+    }
 }
 void Application::beginCapture() {
     preparing = false;

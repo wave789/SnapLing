@@ -4,6 +4,8 @@
 #include <QTimer>
 #include <QElapsedTimer>
 #include <functional>
+#include <vector>
+class QDBusMessage;
 namespace SnapLing {
 class PortalRequest;
 class PipeWireStream;
@@ -11,7 +13,8 @@ class WaylandCapture final : public ICaptureBackend {
     Q_OBJECT
   public:
     using StreamFactory = std::function<std::unique_ptr<PipeWireStream>()>;
-    explicit WaylandCapture(QObject *parent = nullptr, StreamFactory factory = {});
+    using ScreenProvider = std::function<QVector<CaptureScreen>()>;
+    explicit WaylandCapture(QObject *parent = nullptr, StreamFactory factory = {}, ScreenProvider screens = {});
     ~WaylandCapture() override;
     void capture(CaptureMode, int screen = -1) override;
     void cancel() override;
@@ -27,6 +30,7 @@ class WaylandCapture final : public ICaptureBackend {
     }
     void startSharing();
     void stopSharing();
+    void resetScreenSelection();
     bool sharing() const {
         return active;
     }
@@ -34,7 +38,7 @@ class WaylandCapture final : public ICaptureBackend {
   signals:
     void sharingChanged(bool active);
   private slots:
-    void sessionClosed();
+    void sessionClosed(const QDBusMessage &message);
 
   private:
     void portalCapture();
@@ -47,16 +51,28 @@ class WaylandCapture final : public ICaptureBackend {
     void selectSources();
     void startSession();
     void openRemote(const QVariantMap &data);
+    QVector<CaptureScreen> currentScreens() const;
+    bool requestedSourcesAvailable();
     QPointer<PortalRequest> request;
     QString session;
     bool active = false;
     bool starting = false, temporarySharing = false, capturePending = false;
     QTimer frameTimer;
     QElapsedTimer frameWait;
-    QRectF sharedDesktop;
+    bool composing = false, allScreens = true;
+    QString requestedScreen;
+    QVector<CaptureScreen> layout;
     StreamFactory streamFactory;
+    ScreenProvider screenProvider;
 #ifdef SNAPLING_HAVE_PIPEWIRE
-    std::unique_ptr<PipeWireStream> stream;
+    struct SharedSource {
+        uint node = 0;
+        QString serial;
+        CaptureScreen screen;
+        std::unique_ptr<PipeWireStream> stream;
+    };
+    std::vector<SharedSource> sources;
+    int opening = 0;
 #endif
 };
 } // namespace SnapLing

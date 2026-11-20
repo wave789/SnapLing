@@ -25,4 +25,6 @@ class ICaptureBackend : public QObject {
 };
 std::unique_ptr<ICaptureBackend> createCaptureBackend();
 QString platformDescription();
+QVector<CaptureScreen> captureScreenLayout();
+CaptureFrame combineCaptureScreens(QVector<CaptureScreen> screens, QString &error);
 } // namespace SnapLing

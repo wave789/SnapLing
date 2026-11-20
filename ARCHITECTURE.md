@@ -8,9 +8,11 @@
 
 - Windows：工作线程使用 GetDC / BitBlt / GetDIBits，原生资源由 RAII 释放。每个显示器查询物理矩形，再拼接到统一像素密度的逻辑桌面。窗口矩形来自 EnumWindows 与 DWM 扩展边界。当前窗口捕获是可见桌面裁切，没有 WGC 独立离屏窗口捕获。
 - X11：RandR 匹配显示器名称与物理坐标；独立 XCB 连接获取根窗口像素与窗口边界。窗口查询失败不会触发 Xlib 默认致命错误。高 DPI 和负逻辑原点映射由 CaptureFrame 统一处理。
-- Wayland：普通截图执行 CreateSession → SelectSources（单显示器）→ Start → OpenPipeWireRemote，异步等待可读取的首帧，取得整屏画面后停止临时共享并创建 SnapLing 选区。首帧等待上限 10 秒。用户单独开启的持续共享复用同一来源和最新一帧，直到主动停止。授权恢复 token 每次更新，旧请求由 generation 标记隔离。
+- Wayland：普通截图执行 CreateSession → SelectSources（multiple=true，显示器来源）→ Start，解析全部视频节点，按所选屏幕过滤，并为每一路调用 OpenPipeWireRemote。各流独立持有远程连接，避免多个 core 读取 dup 后的同一协议 socket。异步等待所需各屏首帧，在工作线程拼接后停止临时共享，再创建 SnapLing 选区。首帧等待上限 10 秒。用户单独开启的持续共享可复用各屏最新一帧并切换目标屏幕。
 - PortalRequest 在方法调用前订阅 Response，避免响应竞态；支持请求 Close、超时和旧路径兼容。PipeWire 的 pw_thread_loop 负责视频回调，仅缓存当前有效流的一帧，停止时销毁流、远程 core/context 和会话。只接受可映射的 CPU RGB 帧。未启用 PipeWire 的构建仅尝试非交互式 Screenshot Portal，本地 URI 在工作线程解码；拒绝时报告依赖问题。
-- ScreenCast 返回的逻辑 position/size 用于显示器坐标映射，缺失时回退主屏幕。覆盖层选择对应 QScreen 并以图像尺寸映射选区；物理多屏与混合 DPI 仍需实机验证。
+- ScreenCast 的 position/size 与 Qt 屏幕布局匹配，必要时使用与 QScreen 名称相同的来源标识；只有单屏才允许缺失元数据时回退。多屏无法匹配、授权不全或指定屏幕未授权时明确报错。旧单屏 restore token 不再复用，多屏 token 单独存储，每次授权后更新。「重新选择共享屏幕」清除已存选择并开始新截图。显示器变化会关闭旧流并清除恢复选择；请求由 generation 隔离，Closed 信号检查会话路径。
+
+`CaptureFrame.screens` 保留各屏名称、全局逻辑矩形和原生像素。`combineCaptureScreens` 按最高像素密度拼接完整桌面，处理负原点与屏幕间空隙，限制输出至 1 亿像素。区域截图为每个输出创建独立 `SelectionOverlay`，直接使用各屏原生图像；在一屏完成选区后关闭其他遮罩，再继续该屏的同一编辑会话。全屏拼接图在一个输出上按比例预览。物理多屏与混合 DPI 仍需实机验证。
 
 后台快捷键触发直接提交采集任务，采集结束才创建选区。由本程序按钮触发时先隐藏本程序窗口、等待合成器更新；延时结束也先关闭倒计时。最终图像从捕获帧生成，不对选区窗口自身截屏。首次系统授权不在本程序控制范围内。
 

@@ -15,6 +15,8 @@
 #include <QDBusObjectPath>
 #include <QDBusUnixFileDescriptor>
 #include <QFrame>
+#include <QClipboard>
+#include <QToolButton>
 #include <QPushButton>
 #include <QScreen>
 #include <QSettings>
@@ -105,6 +107,7 @@ class ScreenCastPortal : public QDBusAbstractAdaptor {
     uint startCode = 0;
     bool invalidStreams = false;
     QRect desktop;
+    VideoNodes nodeList;
     QVariantMap sourceOptions;
     QStringList sessions;
   public slots:
@@ -128,7 +131,7 @@ class ScreenCastPortal : public QDBusAbstractAdaptor {
             properties["position"] = QVariant::fromValue(CoordinatePair{desktop.x(), desktop.y()});
             properties["size"] = QVariant::fromValue(CoordinatePair{desktop.width(), desktop.height()});
         }
-        const VideoNodes nodes{{37, properties}};
+        const VideoNodes nodes = nodeList.isEmpty() ? VideoNodes{{37, properties}} : nodeList;
         return respond(this, options, startCode,
                        {{"streams", invalidStreams ? QVariant("invalid") : QVariant::fromValue(nodes)},
                         {"restore_token", "test_restore"}}, startDelay);
@@ -144,22 +147,27 @@ class ScreenCastPortal : public QDBusAbstractAdaptor {
 #ifdef SNAPLING_HAVE_PIPEWIRE
 struct StreamControl {
     QImage frame;
+    QHash<uint, QImage> frames;
+    QList<uint> startedNodes;
     int started = 0, stopped = 0;
-    bool descriptorValid = false;
+    bool descriptorValid = true;
 };
 class TestStream : public PipeWireStream {
   public:
     explicit TestStream(std::shared_ptr<StreamControl> control) : control(std::move(control)) {}
     bool start(int descriptor, uint node, const QString &serial, QString &) override {
-        control->descriptorValid = ::fcntl(descriptor, F_GETFD) >= 0 && node == 37 && serial == "42";
+        this->node = node;
+        control->descriptorValid &= ::fcntl(descriptor, F_GETFD) >= 0 && serial == QString::number(node + 5);
         ::close(descriptor);
         ++control->started;
+        control->startedNodes << node;
         return true;
     }
     void stop() override { ++control->stopped; }
-    QImage latest() const override { return control->frame; }
+    QImage latest() const override { return control->frames.contains(node) ? control->frames.value(node) : control->frame; }
   private:
     std::shared_ptr<StreamControl> control;
+    uint node = 0;
 };
 #endif
 class TestCaptureFlow : public QObject {
@@ -169,8 +177,28 @@ class TestCaptureFlow : public QObject {
     ScreenCastPortal screenCast{&screenshot};
     QTemporaryDir images;
     QImage image;
+    QVector<CaptureScreen> testLayout;
 #ifdef SNAPLING_HAVE_PIPEWIRE
     std::shared_ptr<StreamControl> control;
+    static VideoNode node(uint id, const CaptureScreen &screen) {
+        return {id, {{"id", QString::number(id)}, {"source_type", uint(1)},
+                     {"pipewire-serial", QString::number(id + 5)},
+                     {"position", QVariant::fromValue(CoordinatePair{qRound(screen.desktop.x()), qRound(screen.desktop.y())})},
+                     {"size", QVariant::fromValue(CoordinatePair{qRound(screen.desktop.width()), qRound(screen.desktop.height())})}}};
+    }
+    void threeScreens() {
+        testLayout = {{"eDP-1", {0, 0, 960, 600}, {}, 1},
+                      {"HDMI-A-1", {-1280, 0, 1280, 720}, {}, 1.5},
+                      {"DP-1", {960, -180, 800, 600}, {}, 2}};
+        const QList<QColor> colors{QColor("#20c060"), QColor("#2458d8"), QColor("#dc3b4b")};
+        for (int i = 0; i < testLayout.size(); ++i) {
+            QImage frame((testLayout[i].desktop.size() * testLayout[i].devicePixelRatio).toSize(), QImage::Format_RGB32);
+            frame.fill(colors[i]);
+            control->frames[uint(37 + i)] = frame;
+        }
+        // Portal 返回顺序与 Qt 的显示器顺序不同，防止错误依赖第一个节点。
+        screenCast.nodeList = {node(39, testLayout[2]), node(37, testLayout[0]), node(38, testLayout[1])};
+    }
 #endif
     template <class T> static QList<T *> windows() {
         QList<T *> result;
@@ -183,9 +211,9 @@ class TestCaptureFlow : public QObject {
 #ifdef SNAPLING_HAVE_PIPEWIRE
         return std::make_unique<WaylandCapture>(nullptr, [state = control] {
             return std::make_unique<TestStream>(state);
-        });
+        }, [this] { return testLayout; });
 #else
-        return std::make_unique<WaylandCapture>();
+        return std::make_unique<WaylandCapture>(nullptr, WaylandCapture::StreamFactory{}, [this] { return testLayout; });
 #endif
     }
   private slots:
@@ -217,8 +245,11 @@ class TestCaptureFlow : public QObject {
         screenCast.startDelay = 0;
         screenCast.invalidStreams = false;
         screenCast.desktop = {};
+        screenCast.nodeList.clear();
+        testLayout = captureScreenLayout();
         screenCast.sourceOptions.clear();
         QSettings().remove("wayland/restoreToken");
+        QSettings().remove("wayland/multiScreenRestoreToken");
 #ifdef SNAPLING_HAVE_PIPEWIRE
         control = std::make_shared<StreamControl>();
         control->frame = image;
@@ -265,7 +296,7 @@ class TestCaptureFlow : public QObject {
         QCOMPARE(screenCast.created, 1);
         QCOMPARE(screenCast.opened, 1);
         QCOMPARE(screenCast.sourceOptions["types"].toUInt(), uint(1));
-        QVERIFY(!screenCast.sourceOptions["multiple"].toBool());
+        QVERIFY(screenCast.sourceOptions["multiple"].toBool());
         QVERIFY(control->descriptorValid);
         QCOMPARE(control->stopped, 1);
         QTRY_COMPARE(screenCast.closed, 1);
@@ -300,6 +331,246 @@ class TestCaptureFlow : public QObject {
         }
     }
 #ifdef SNAPLING_HAVE_PIPEWIRE
+    void allThreeScreensAndMixedDpi() {
+        threeScreens();
+        auto capture = backend();
+        QSignalSpy frames(capture.get(), &ICaptureBackend::captured);
+        capture->capture(CaptureMode::Region);
+        QTRY_COMPARE(frames.size(), 1);
+        const auto frame = qvariant_cast<CaptureFrame>(frames.first().first());
+        QCOMPARE(frame.screens.size(), 3);
+        QCOMPARE(frame.desktop, QRectF(-1280, -180, 3040, 900));
+        QCOMPARE(frame.image.size(), QSize(6080, 1800));
+        for (int i = 0; i < testLayout.size(); ++i) {
+            const auto at = frame.toPixel(testLayout[i].desktop.center()).toPoint();
+            QCOMPARE(frame.image.pixelColor(at), control->frames.value(uint(37 + i)).pixelColor(0, 0));
+        }
+        QCOMPARE(control->started, 3);
+        QCOMPARE(control->stopped, 3);
+        QCOMPARE(screenCast.opened, 3);
+        QVERIFY(control->descriptorValid);
+        QVERIFY(screenCast.sourceOptions["multiple"].toBool());
+        QTRY_COMPARE(screenCast.closed, 1);
+    }
+    void selectedExternalIgnoresPortalOrder_data() {
+        QTest::addColumn<int>("screen");
+        QTest::newRow("hdmi") << 1;
+        QTest::newRow("displayport") << 2;
+    }
+    void selectedExternalIgnoresPortalOrder() {
+        QFETCH(int, screen);
+        threeScreens();
+        auto capture = backend();
+        QSignalSpy frames(capture.get(), &ICaptureBackend::captured);
+        capture->capture(CaptureMode::Region, screen);
+        QTRY_COMPARE(frames.size(), 1);
+        const auto frame = qvariant_cast<CaptureFrame>(frames.first().first());
+        QCOMPARE(frame.screenName, testLayout[screen].name);
+        QCOMPARE(frame.desktop, testLayout[screen].desktop);
+        QCOMPARE(frame.image, control->frames.value(uint(37 + screen)));
+        QCOMPARE(frame.screens.size(), 1);
+        QCOMPARE(control->startedNodes, QList<uint>{uint(37 + screen)});
+        QCOMPARE(screenCast.opened, 1);
+    }
+    void sameResolutionScreensUsePosition() {
+        threeScreens();
+        testLayout[1].desktop = {-960, 0, 960, 600};
+        testLayout[2].desktop = {960, 0, 960, 600};
+        screenCast.nodeList = {node(39, testLayout[2]), node(37, testLayout[0]), node(38, testLayout[1])};
+        auto capture = backend();
+        QSignalSpy frames(capture.get(), &ICaptureBackend::captured);
+        capture->capture(CaptureMode::Region, 1);
+        QTRY_COMPARE(frames.size(), 1);
+        const auto frame = qvariant_cast<CaptureFrame>(frames.first().first());
+        QCOMPARE(frame.screenName, QString("HDMI-A-1"));
+        QCOMPARE(frame.desktop, testLayout[1].desktop);
+        QCOMPARE(frame.image, control->frames.value(38));
+    }
+    void allScreensWaitForExternal() {
+        threeScreens();
+        const auto external = control->frames.value(39);
+        control->frames[39] = {};
+        auto capture = backend();
+        QSignalSpy frames(capture.get(), &ICaptureBackend::captured);
+        capture->capture(CaptureMode::Region);
+        QTRY_COMPARE(control->started, 3);
+        QTest::qWait(60);
+        QVERIFY(frames.isEmpty());
+        control->frames[39] = external;
+        QTRY_COMPARE(frames.size(), 1);
+        QCOMPARE(qvariant_cast<CaptureFrame>(frames.first().first()).screens.size(), 3);
+        QCOMPARE(control->stopped, 3);
+    }
+    void missingAuthorizationCanBeReselected() {
+        threeScreens();
+        const auto all = screenCast.nodeList;
+        screenCast.nodeList = {node(37, testLayout[0])};
+        Application app(nullptr, backend());
+        app.command({"--capture"});
+        QTRY_COMPARE(screenCast.started, 1);
+        QTRY_COMPARE(screenCast.closed, 1);
+        QVERIFY(windows<SelectionOverlay>().isEmpty());
+        QCOMPARE(control->started, 0);
+        auto *main = windows<QMainWindow>().first();
+        QVERIFY(main->isVisible());
+        screenCast.nodeList = all;
+        bool clicked = false;
+        for (auto *button : main->findChildren<QPushButton *>())
+            if (button->text() == "重新选择共享屏幕…") {
+                button->click();
+                clicked = true;
+                break;
+            }
+        QVERIFY(clicked);
+        QTRY_COMPARE(windows<SelectionOverlay>().size(), 3);
+        QVERIFY(!screenCast.sourceOptions.contains("restore_token"));
+        QTRY_COMPARE(screenCast.closed, 2);
+    }
+    void unknownMultiScreenGeometryFailsSafely() {
+        threeScreens();
+        for (auto &source : screenCast.nodeList) {
+            source.properties.remove("position");
+            source.properties.remove("size");
+        }
+        auto capture = backend();
+        QSignalSpy frames(capture.get(), &ICaptureBackend::captured), failed(capture.get(), &ICaptureBackend::failed);
+        capture->capture(CaptureMode::Region, 2);
+        QTRY_COMPARE(failed.size(), 1);
+        QVERIFY(frames.isEmpty());
+        QCOMPARE(control->started, 0);
+    }
+    void sharedSourcesSwitchExternalScreens() {
+        threeScreens();
+        auto capture = backend();
+        capture->startSharing();
+        QTRY_VERIFY(capture->sharing());
+        QSignalSpy frames(capture.get(), &ICaptureBackend::captured);
+        for (int screen : {1, 2}) {
+            capture->capture(CaptureMode::Region, screen);
+            QTRY_COMPARE(frames.size(), screen);
+            const auto frame = qvariant_cast<CaptureFrame>(frames.last().first());
+            QCOMPARE(frame.image, control->frames.value(uint(37 + screen)));
+            QVERIFY(capture->sharing());
+        }
+        capture->capture(CaptureMode::Region);
+        QTRY_COMPARE(frames.size(), 3);
+        QCOMPARE(qvariant_cast<CaptureFrame>(frames.last().first()).screens.size(), 3);
+        QCOMPARE(screenCast.created, 1);
+        QCOMPARE(screenCast.opened, 3);
+        QCOMPARE(control->stopped, 0);
+        capture->stopSharing();
+        QTRY_COMPARE(screenCast.closed, 1);
+        QCOMPARE(control->stopped, 3);
+    }
+    void externalOverlayKeepsNativePixelsAndAnnotations() {
+        threeScreens();
+        Application app(nullptr, backend());
+        app.command({"--capture"});
+        QTRY_COMPARE(windows<SelectionOverlay>().size(), 3);
+        SelectionOverlay *external = nullptr;
+        for (auto *overlay : windows<SelectionOverlay>())
+            if (overlay->captureScreenName() == "DP-1")
+                external = overlay;
+        QVERIFY(external);
+        QTest::mousePress(external, Qt::LeftButton, Qt::NoModifier, {40, 40});
+        QTest::mouseRelease(external, Qt::LeftButton, Qt::NoModifier, {240, 180});
+        QTRY_COMPARE(windows<SelectionOverlay>().size(), 1);
+        QCOMPARE(external->phase(), SelectionOverlay::Phase::QuickEditing);
+        auto session = external->session();
+        QCOMPARE(session->document.original().size(), QSize(400, 280));
+        QCOMPARE(session->document.original().pixelColor(10, 10), control->frames.value(39).pixelColor(0, 0));
+        auto *canvas = external->canvasWidget();
+        canvas->setTool(Tool::Arrow);
+        QTest::mousePress(canvas, Qt::LeftButton, Qt::NoModifier, {20, 20});
+        QTest::mouseMove(canvas, {90, 65}, 20);
+        QTest::mouseRelease(canvas, Qt::LeftButton, Qt::NoModifier, {90, 65});
+        QCOMPARE(session->document.state().annotations.size(), 1);
+        QTest::keyClick(canvas, Qt::Key_Return);
+        QTRY_VERIFY(windows<SelectionOverlay>().isEmpty());
+        QTRY_COMPARE(windows<EditorWindow>().size(), 1);
+        QCOMPARE(windows<EditorWindow>().first()->document(), &session->document);
+        QCOMPARE(session->document.state().annotations.size(), 1);
+    }
+    void cancellingAnyOverlayClosesAllAndCanRetry() {
+        threeScreens();
+        Application app(nullptr, backend());
+        app.command({"--capture"});
+        QTRY_COMPARE(windows<SelectionOverlay>().size(), 3);
+        QTest::keyClick(windows<SelectionOverlay>().first(), Qt::Key_Escape);
+        QTRY_VERIFY(windows<SelectionOverlay>().isEmpty());
+        QVERIFY(windows<EditorWindow>().isEmpty());
+        app.command({"--capture"});
+        QTRY_COMPARE(windows<SelectionOverlay>().size(), 3);
+        QCOMPARE(screenCast.created, 2);
+    }
+    void fullDesktopContainsAllScreens() {
+        threeScreens();
+        Application app(nullptr, backend());
+        app.command({"--full"});
+        QTRY_COMPARE(windows<SelectionOverlay>().size(), 1);
+        auto *overlay = windows<SelectionOverlay>().first();
+        QTRY_COMPARE(overlay->phase(), SelectionOverlay::Phase::QuickEditing);
+        const auto session = overlay->session();
+        QCOMPARE(session->document.original().size(), QSize(6080, 1800));
+        CaptureFrame mapping;
+        mapping.desktop = {-1280, -180, 3040, 900};
+        mapping.image = session->document.original();
+        for (int i = 0; i < testLayout.size(); ++i)
+            QCOMPARE(mapping.image.pixelColor(mapping.toPixel(testLayout[i].desktop.center()).toPoint()),
+                     control->frames.value(uint(37 + i)).pixelColor(0, 0));
+    }
+    void legacySingleScreenTokenIsNotReused() {
+        QSettings settings;
+        settings.setValue("wayland/restoreToken", "old_internal_screen");
+        auto capture = backend();
+        QSignalSpy frames(capture.get(), &ICaptureBackend::captured);
+        capture->capture(CaptureMode::Region);
+        QTRY_COMPARE(frames.size(), 1);
+        QVERIFY(!screenCast.sourceOptions.contains("restore_token"));
+        QCOMPARE(settings.value("wayland/multiScreenRestoreToken").toString(), QString("test_restore"));
+        capture->capture(CaptureMode::Region);
+        QTRY_COMPARE(frames.size(), 2);
+        QCOMPARE(screenCast.sourceOptions["restore_token"].toString(), QString("test_restore"));
+        capture->resetScreenSelection();
+        capture->capture(CaptureMode::Region);
+        QTRY_COMPARE(frames.size(), 3);
+        QVERIFY(!screenCast.sourceOptions.contains("restore_token"));
+    }
+    void changedLayoutReauthorizesSharedSources() {
+        threeScreens();
+        auto capture = backend();
+        capture->startSharing();
+        QTRY_VERIFY(capture->sharing());
+        testLayout[2].desktop.translate(300, 0);
+        screenCast.nodeList[0] = node(39, testLayout[2]);
+        QSignalSpy frames(capture.get(), &ICaptureBackend::captured);
+        capture->capture(CaptureMode::Region, 2);
+        QTRY_COMPARE(frames.size(), 1);
+        QCOMPARE(qvariant_cast<CaptureFrame>(frames.first().first()).desktop, testLayout[2].desktop);
+        QVERIFY(!screenCast.sourceOptions.contains("restore_token"));
+        QTRY_COMPARE(screenCast.closed, 2);
+    }
+    void portalClosureMatchesCurrentSession() {
+        threeScreens();
+        auto capture = backend();
+        capture->startSharing();
+        QTRY_VERIFY(capture->sharing());
+        const auto previous = screenCast.sessions.last();
+        capture->resetScreenSelection();
+        capture->startSharing();
+        QTRY_VERIFY(capture->sharing());
+        const auto current = screenCast.sessions.last();
+        QVERIFY(current != previous);
+        auto signal = QDBusMessage::createSignal(previous, "org.freedesktop.portal.Session", "Closed");
+        QVERIFY(QDBusConnection::sessionBus().send(signal));
+        QTest::qWait(60);
+        QVERIFY(capture->sharing());
+        signal = QDBusMessage::createSignal(current, "org.freedesktop.portal.Session", "Closed");
+        QVERIFY(QDBusConnection::sessionBus().send(signal));
+        QTRY_VERIFY(!capture->sharing());
+        QTRY_COMPARE(screenCast.closed, 2);
+        QCOMPARE(control->stopped, 6);
+    }
     void portalDesktopCoordinates() {
         screenCast.desktop = QRect(-1280, 180, 1280, 720);
         auto capture = backend();
@@ -396,6 +667,16 @@ class TestCaptureFlow : public QObject {
         QCOMPARE(control->stopped, 1);
     }
 #else
+    void multipleScreensRequirePipeWire() {
+        testLayout << CaptureScreen{"external", {800, 0, 800, 600}, {}};
+        auto capture = backend();
+        QSignalSpy failed(capture.get(), &ICaptureBackend::failed), frames(capture.get(), &ICaptureBackend::captured);
+        capture->capture(CaptureMode::Region, 1);
+        QTRY_COMPARE(failed.size(), 1);
+        QVERIFY(failed.first().first().toString().contains("PipeWire"));
+        QVERIFY(frames.isEmpty());
+        QVERIFY(screenshot.requests.isEmpty());
+    }
     void deniedDoesNotOpenSystemSelector() {
         screenshot.code = 2;
         auto capture = backend();
