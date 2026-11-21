@@ -84,6 +84,7 @@ if(UNIX)
  install(SCRIPT "${CMAKE_CURRENT_BINARY_DIR}/install-desktop.cmake")
  install(PROGRAMS tools/setup-rapidocr.py tools/install-paddleocr-models.sh DESTINATION share/snapling/tools)
  install(FILES tools/rapidocr-worker.py tools/paddleocr_profile.py DESTINATION share/snapling/tools)
+ install(DIRECTORY tools/gnome-fast-screenshot/ DESTINATION share/gnome-shell/extensions/snapling-no-flash@snapling.local)
  install(DIRECTORY src/assets/models/PaddleOCR/ DESTINATION share/snapling/models/paddleocr
          FILES_MATCHING PATTERN "*.onnx" PATTERN "inference.yml")
 else()

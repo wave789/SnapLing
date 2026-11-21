@@ -168,14 +168,17 @@ void WaylandCapture::portalCapture(ScreenshotPurpose purpose) {
 }
 void WaylandCapture::requestScreenshot(ScreenshotPurpose purpose) {
     const auto job = generation;
+    QElapsedTimer portalWait;
+    portalWait.start();
     request = new PortalRequest(screenshotConnection->bus(), this);
     request->call("org.freedesktop.portal.Screenshot", "Screenshot", {QString()},
                   {{"interactive", false}, {"modal", false}},
-                  [this, job, purpose](uint code, QVariantMap data, QString error) {
+                  [this, job, purpose, portalWait](uint code, QVariantMap data, QString error) {
         if (job != generation)
             return;
         request = nullptr;
-        qInfo("portal_screenshot_response code=%u has_uri=%d", code, data.contains("uri"));
+        qInfo("portal_screenshot_response code=%u has_uri=%d portal_round_trip_ms=%lld",
+              code, data.contains("uri"), portalWait.elapsed());
         if (code) {
             if (code == 2 && error.isEmpty())
                 reportScreenshotFailure(purpose);
@@ -197,15 +200,17 @@ void WaylandCapture::requestScreenshot(ScreenshotPurpose purpose) {
             return;
         }
         struct Result { CaptureFrame frame; QString error; QSize pixels; QRectF desktop; };
+        QElapsedTimer imageWait;
+        imageWait.start();
         auto *watcher = new QFutureWatcher<Result>(this);
-        connect(watcher, &QFutureWatcher<Result>::finished, this, [this, watcher, job] {
+        connect(watcher, &QFutureWatcher<Result>::finished, this, [this, watcher, job, imageWait] {
             auto result = watcher->result();
             watcher->deleteLater();
             if (job != generation)
                 return;
-            qInfo("portal_screenshot_pixels=%dx%d desktop=%.0f,%.0f,%.0fx%.0f",
+            qInfo("portal_screenshot_pixels=%dx%d desktop=%.0f,%.0f,%.0fx%.0f image_prepare_ms=%lld",
                   result.pixels.width(), result.pixels.height(), result.desktop.x(), result.desktop.y(),
-                  result.desktop.width(), result.desktop.height());
+                  result.desktop.width(), result.desktop.height(), imageWait.elapsed());
             if (!sameLayout(layout, currentScreens())) {
                 failSharing("截图期间显示器布局已改变，请重新截图。");
                 return;

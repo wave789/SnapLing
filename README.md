@@ -64,7 +64,7 @@ Wayland 默认请求非交互式 Screenshot，后台解码完整桌面，按 Qt 
 
 Ubuntu GNOME 的白色闪光是系统截图动画。若要关闭闪光并继续使用默认的单次截图，可在自己的桌面会话里运行 `gsettings set org.gnome.desktop.interface enable-animations false`。该设置也会关闭其他 GNOME 动画。恢复系统默认值时运行 `gsettings reset org.gnome.desktop.interface enable-animations`。
 
-想保留其他界面动画，可以用 GNOME Shell 用户扩展将截图闪光设为透明。[设置方法和对照测试](docs/GNOME_FLASH.md)
+想保留其他界面动画，可以启用可选的 GNOME Shell 用户扩展。它只跳过截图闪光过渡，同时缩短截图服务交付图片的等待时间。[设置方法和分段计时](docs/GNOME_FLASH.md)
 
 即时编辑与高级编辑共享 `Document`、`Canvas` 和 `EditorSession`。OCR、翻译和图片保存异步运行，可在任务执行中继续标注、撤销、复制或进入高级编辑器。错误显示在当前界面的状态提示中。远程翻译通过非阻塞确认控件显示发送目的地。
 

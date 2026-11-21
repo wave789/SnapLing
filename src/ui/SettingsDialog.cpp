@@ -2,6 +2,10 @@
 #include "ocr/OcrEngine.h"
 #ifndef Q_OS_WIN
 #include "ocr/RapidOcr.h"
+#include <QDBusConnection>
+#include <QDBusPendingCallWatcher>
+#include <QDBusPendingReply>
+#include <QTimer>
 #endif
 #include "platform/Autostart.h"
 #include "translation/TranslationProvider.h"
@@ -28,6 +32,89 @@
 #include <QTabWidget>
 #include <QVBoxLayout>
 namespace SnapLing {
+#ifndef Q_OS_WIN
+namespace {
+void addGnomeScreenshotAcceleration(QFormLayout *form) {
+    auto *row = new QWidget;
+    auto *layout = new QHBoxLayout(row);
+    layout->setContentsMargins(0, 0, 0, 0);
+    auto *button = new QPushButton("启用", row);
+    button->setObjectName("gnomeScreenshotAccelerationButton");
+    button->setEnabled(false);
+    auto *status = new QLabel("正在检查 GNOME 扩展…", row);
+    status->setObjectName("gnomeScreenshotAccelerationStatus");
+    status->setWordWrap(true);
+    layout->addWidget(button);
+    layout->addWidget(status, 1);
+    form->addRow("单次截图提速", row);
+
+    const auto call = [row](const QString &method, auto handler) {
+        auto message = QDBusMessage::createMethodCall("org.gnome.Shell",
+                                                     "/org/gnome/Shell",
+                                                     "org.gnome.Shell.Extensions", method);
+        message << QStringLiteral("snapling-no-flash@snapling.local");
+        auto *watcher = new QDBusPendingCallWatcher(QDBusConnection::sessionBus().asyncCall(message, 2500), row);
+        QObject::connect(watcher, &QDBusPendingCallWatcher::finished, row, [watcher, handler] {
+            handler(*watcher);
+            watcher->deleteLater();
+        });
+    };
+    const auto refresh = [call, button, status] {
+        button->setEnabled(false);
+        call("GetExtensionInfo", [button, status](const QDBusPendingCall &pending) {
+            const QDBusPendingReply<QVariantMap> reply = pending;
+            if (reply.isError()) {
+                status->setText("无法读取 GNOME 扩展状态。");
+                return;
+            }
+            const auto info = reply.value();
+            if (info.isEmpty()) {
+                status->setText("GNOME 尚未发现提速扩展。若刚安装 DEB，请注销后重新登录。");
+                return;
+            }
+            if (info.value("version").toDouble() < 2) {
+                status->setText("当前会话加载了旧版透明白闪扩展。请按项目说明更新后重新登录。");
+                return;
+            }
+
+            // org.gnome.Shell.Extensions reports the requested preference separately from the live state.
+            const int state = info.value("state").toInt();
+            const bool active = state == 1;
+            const bool enabled = info.value("enabled", active).toBool();
+            button->setProperty("extensionEnabled", enabled);
+            button->setText(enabled ? "停用" : "启用");
+            button->setEnabled(state != 4);
+            if (state == 4)
+                status->setText("此扩展不支持当前 GNOME 版本。");
+            else if (state == 3)
+                status->setText("扩展加载失败。可在 GNOME 扩展应用中查看错误。");
+            else if (active)
+                status->setText("正在跳过系统截图的闪光过渡。");
+            else if (enabled)
+                status->setText("已请求启用，GNOME 尚未激活扩展。");
+            else
+                status->setText("启用后跳过系统截图的闪光过渡。");
+        });
+    };
+    QObject::connect(button, &QPushButton::clicked, row, [call, refresh, button, status] {
+        button->setEnabled(false);
+        status->setText("正在更新 GNOME 扩展状态…");
+        call(button->property("extensionEnabled").toBool() ? "DisableExtension" : "EnableExtension",
+             [refresh, button, status](const QDBusPendingCall &pending) {
+                 const QDBusPendingReply<bool> reply = pending;
+                 if (reply.isError() || !reply.value()) {
+                     status->setText("GNOME 未能更新提速扩展。");
+                     button->setEnabled(true);
+                     return;
+                 }
+                 QTimer::singleShot(300, button, refresh);
+             });
+    });
+    refresh();
+}
+} // namespace
+#endif
+
 SettingsDialog::SettingsDialog(Settings &s, ProviderConfig &runtime, QWidget *parent) : QDialog(parent) {
     setWindowTitle("SnapLing 设置");
     resize(660, 560);
@@ -52,13 +139,14 @@ SettingsDialog::SettingsDialog(Settings &s, ProviderConfig &runtime, QWidget *pa
     auto *captureMethod = new QComboBox(this);
     captureMethod->addItem("系统单次截图（默认，无持续共享）", "screenshot");
     captureMethod->addItem("兼容截图（需要系统选择共享屏幕，取图后结束）", "screencast");
-    if (qEnvironmentVariable("XDG_CURRENT_DESKTOP").split(':').contains("GNOME", Qt::CaseInsensitive)) {
-        captureMethod->setToolTip("GNOME 的单次截图可能有系统闪光。关闭 GNOME 的界面动画可消除闪光，也会影响其他桌面动画。");
-    }
     captureMethod->setCurrentIndex(qMax(0, captureMethod->findData(s.value("capture/waylandMethod", "screenshot"))));
-    if (QGuiApplication::platformName().contains("wayland") || qEnvironmentVariable("XDG_SESSION_TYPE") == "wayland")
+    if (QGuiApplication::platformName().contains("wayland") || qEnvironmentVariable("XDG_SESSION_TYPE") == "wayland") {
         general->addRow("截图方式", captureMethod);
-    else
+#ifndef Q_OS_WIN
+        if (qEnvironmentVariable("XDG_CURRENT_DESKTOP").split(':').contains("GNOME", Qt::CaseInsensitive))
+            addGnomeScreenshotAcceleration(general);
+#endif
+    } else
         captureMethod->hide();
     auto *startup = new QCheckBox("登录后自动启动");
     startup->setChecked(s.value("general/startup", false).toBool());

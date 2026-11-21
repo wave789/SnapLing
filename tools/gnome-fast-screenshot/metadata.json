@@ -1,0 +1,7 @@
+{
+  "uuid": "snapling-no-flash@snapling.local",
+  "name": "Skip Screenshot Flash",
+  "description": "Skip the GNOME Shell screenshot flash transition while keeping desktop animations",
+  "shell-version": ["48", "49", "50"],
+  "version": 2
+}
