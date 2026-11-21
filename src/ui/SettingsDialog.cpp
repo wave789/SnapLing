@@ -72,7 +72,8 @@ void addGnomeScreenshotAcceleration(QFormLayout *form) {
                 status->setText("GNOME 尚未发现提速扩展。若刚安装 DEB，请注销后重新登录。");
                 return;
             }
-            if (info.value("version").toDouble() < 2) {
+            const auto version = info.value("version").toDouble();
+            if (version < 2) {
                 status->setText("当前会话加载了旧版透明白闪扩展。请按项目说明更新后重新登录。");
                 return;
             }
@@ -88,12 +89,14 @@ void addGnomeScreenshotAcceleration(QFormLayout *form) {
                 status->setText("此扩展不支持当前 GNOME 版本。");
             else if (state == 3)
                 status->setText("扩展加载失败。可在 GNOME 扩展应用中查看错误。");
+            else if (active && version >= 3)
+                status->setText("已跳过截图闪光和 SnapLing 选区动画。");
             else if (active)
-                status->setText("正在跳过系统截图的闪光过渡。");
+                status->setText("已跳过截图闪光。新版扩展还可跳过选区动画，请更新后重新登录。");
             else if (enabled)
                 status->setText("已请求启用，GNOME 尚未激活扩展。");
             else
-                status->setText("启用后跳过系统截图的闪光过渡。");
+                status->setText("启用后跳过截图闪光。新版扩展也会跳过 SnapLing 选区动画。");
         });
     };
     QObject::connect(button, &QPushButton::clicked, row, [call, refresh, button, status] {
