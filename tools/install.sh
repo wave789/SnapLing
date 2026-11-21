@@ -41,6 +41,7 @@ if [[ -d .deps/usr ]]; then
     python3 tools/bundle-linux.py "$snapling_prefix"
     snapling_executable="$snapling_prefix/snapling"
 fi
+./tools/install-paddleocr-models.sh
 
 snapling_applications="$snapling_prefix/share/applications"
 env -u DESTDIR cmake \

@@ -52,16 +52,21 @@ bool parseLines(const QByteArray &output, QSize imageSize, QVector<OcrLine> &lin
 }
 } // namespace
 
-RapidOcr::RapidOcr(QObject *parent) : IOcrEngine(parent) {
+QString RapidOcr::launcher(Profile profile) {
+    return ocrModelRoot() + (profile == Profile::Paddle ? "/RapidOCR/run-paddle-ocr" : "/RapidOCR/run-ocr");
+}
+
+RapidOcr::RapidOcr(Profile selected, QObject *parent)
+    : IOcrEngine(parent), profile(selected), engineName(selected == Profile::Paddle ? "PaddleOCR" : "RapidOCR") {
     deadline.setSingleShot(true);
     deadline.setInterval(45000);
-    connect(&deadline, &QTimer::timeout, this, [this] { abort("RapidOCR 识别超过 45 秒"); });
+    connect(&deadline, &QTimer::timeout, this, [this] { abort(engineName + " 识别超过 45 秒"); });
     connect(&process, &QProcess::readyReadStandardOutput, this, [this] {
         const auto chunk = process.readAllStandardOutput();
         if (!abortReason.isEmpty())
             return;
         if (chunk.size() > outputLimit - output.size()) {
-            abort("RapidOCR 返回的识别结果过大");
+            abort(engineName + " 返回的识别结果过大");
             return;
         }
         output.append(chunk);
@@ -72,7 +77,7 @@ RapidOcr::RapidOcr(QObject *parent) : IOcrEngine(parent) {
     });
     connect(&process, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
         if (error == QProcess::FailedToStart)
-            finish({}, abortReason.isEmpty() ? "无法启动 RapidOCR，请重新运行 setup-rapidocr.py。" : abortReason);
+            finish({}, abortReason.isEmpty() ? "无法启动 " + engineName + "，请重新运行 setup-rapidocr.py。" : abortReason);
     });
     connect(&process, &QProcess::finished, this, [this](int code, QProcess::ExitStatus status) {
         if (!abortReason.isEmpty()) {
@@ -81,12 +86,12 @@ RapidOcr::RapidOcr(QObject *parent) : IOcrEngine(parent) {
         }
         if (status != QProcess::NormalExit || code != 0) {
             auto detail = QString::fromUtf8(diagnostics).simplified().left(300);
-            finish({}, detail.isEmpty() ? "RapidOCR 识别失败，请检查运行环境和模型。" : "RapidOCR：" + detail);
+            finish({}, detail.isEmpty() ? engineName + " 识别失败，请检查运行环境和模型。" : engineName + "：" + detail);
             return;
         }
         QVector<OcrLine> lines;
         if (!parseLines(output, imageSize, lines)) {
-            finish({}, "RapidOCR 返回了无法读取的识别结果，请重新运行 setup-rapidocr.py。");
+            finish({}, engineName + " 返回了无法读取的识别结果，请重新运行 setup-rapidocr.py。");
             return;
         }
         finish(std::move(lines), {});
@@ -110,16 +115,16 @@ void RapidOcr::recognize(QImage image, QString, QString, bool) {
         emit failed("没有可识别的图像");
         return;
     }
-    const auto helper = ocrModelRoot() + "/RapidOCR/run-ocr";
+    const auto helper = launcher(profile);
     const QFileInfo file(helper);
     if (!file.isFile() || !file.isExecutable()) {
-        emit failed("RapidOCR 尚未安装。请运行 setup-rapidocr.py 安装模型和运行环境，或切换到 Tesseract。");
+        emit failed(engineName + " 运行环境尚未准备。请运行 setup-rapidocr.py，或切换到 Tesseract。");
         return;
     }
 
     auto workspace = std::make_shared<QTemporaryDir>(QDir::temp().filePath("SnapLing-OCR-XXXXXX"));
     if (!workspace->isValid()) {
-        emit failed("无法创建 RapidOCR 临时目录");
+        emit failed("无法创建 " + engineName + " 临时目录");
         return;
     }
     input = workspace;
@@ -134,7 +139,7 @@ void RapidOcr::recognize(QImage image, QString, QString, bool) {
         if (input != workspace)
             return;
         if (!wroteImage) {
-            finish({}, "无法写入 RapidOCR 临时图片");
+            finish({}, "无法写入 " + engineName + " 临时图片");
             return;
         }
         startProcess(helper, imagePath);
@@ -146,7 +151,10 @@ void RapidOcr::recognize(QImage image, QString, QString, bool) {
 
 void RapidOcr::startProcess(const QString &helper, const QString &imagePath) {
     process.setStandardInputFile(QProcess::nullDevice());
-    process.start(helper, {imagePath});
+    QStringList arguments{imagePath};
+    if (profile == Profile::Paddle)
+        arguments.prepend(ocrModelRoot() + "/paddleocr");
+    process.start(helper, arguments);
 }
 
 void RapidOcr::cancel() {

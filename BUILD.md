@@ -43,7 +43,7 @@ Wayland 默认使用非交互式 Screenshot Portal，支持单次完整桌面和
 
 程序、资源和文档统一安装到 `~/.local/snapling`。脚本会把该目录内的桌面入口链接到 `${XDG_DATA_HOME:-$HOME/.local/share}/applications`，供应用菜单和截图 Portal 查找。可从应用菜单启动，或运行安装完成时打印的绝对路径。通过 `.deps` 构建时，脚本会一并收集运行库并在安装根目录生成 `snapling` 启动器。
 
-重复执行可更新安装。若旧进程在运行，请从托盘退出后启动新版。可用 `./tools/install.sh --prefix /绝对路径` 更换用户安装目录。构建 DEB 或执行系统安装时，继续使用相应的打包脚本或 `cmake --install build --prefix /usr/local`。
+重复执行可更新安装。安装脚本同时补齐 `~/.snapling/ocr/paddleocr` 下的 ONNX 与 YAML。若旧进程在运行，请从托盘退出后启动新版。可用 `./tools/install.sh --prefix /绝对路径` 更换用户安装目录。构建 DEB 或执行系统安装时，继续使用相应的打包脚本或 `cmake --install build --prefix /usr/local`。系统安装把模型资源放入前缀的 `share/snapling/models/paddleocr`，用户运行 `setup-rapidocr.py` 时复制到自己的模型目录。
 
 ```bash
 ./tools/package-linux.sh

@@ -665,7 +665,11 @@ class TestCore : public QObject {
         painter.drawText(30, 170, "中文识别测试 你好世界");
         painter.end();
         EditorSession session(image, settings, config);
-        for (const auto &engine : QStringList{"tesseract", "rapidocr", "tesseract"}) {
+        QStringList engines{"tesseract", "rapidocr"};
+        if (qEnvironmentVariableIsSet("SNAPLING_TEST_PADDLEOCR"))
+            engines << "paddleocr";
+        engines << "tesseract";
+        for (const auto &engine : engines) {
             SettingsDialog dialog(settings, config);
             auto *selector = dialog.findChild<QComboBox *>("ocrEngine");
             auto *buttons = dialog.findChild<QDialogButtonBox *>();

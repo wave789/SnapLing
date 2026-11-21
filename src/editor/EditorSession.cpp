@@ -50,6 +50,7 @@ void EditorSession::initialize() {
     connectOcr(tesseract, "tesseract");
 #ifndef Q_OS_WIN
     connectOcr(rapidOcr, "rapidocr");
+    connectOcr(paddleOcr, "paddleocr");
 #endif
     connect(&provider, &ITranslationProvider::completed, this, [this](auto units, qint64 ms) {
         setTask(Task::Idle);
@@ -129,8 +130,11 @@ void EditorSession::runOcr(bool thenTranslate) {
     notify("正在本地识别文字… 可继续编辑");
     IOcrEngine *engine = &tesseract;
 #ifndef Q_OS_WIN
-    if (settings.value("ocr/engine").toString() == "rapidocr")
+    const auto engineId = settings.value("ocr/engine").toString();
+    if (engineId == "rapidocr")
         engine = &rapidOcr;
+    else if (engineId == "paddleocr")
+        engine = &paddleOcr;
 #endif
     engine->recognize(document.original(), settings.value("ocr/path").toString(),
                       settings.value("ocr/languages", "chi_sim+eng").toString(),
@@ -223,6 +227,7 @@ void EditorSession::cancel() {
     tesseract.cancel();
 #ifndef Q_OS_WIN
     rapidOcr.cancel();
+    paddleOcr.cancel();
 #endif
     provider.cancel();
 }

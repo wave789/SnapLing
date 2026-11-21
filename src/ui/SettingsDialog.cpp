@@ -1,5 +1,8 @@
 #include "SettingsDialog.h"
 #include "ocr/OcrEngine.h"
+#ifndef Q_OS_WIN
+#include "ocr/RapidOcr.h"
+#endif
 #include "platform/Autostart.h"
 #include "translation/TranslationProvider.h"
 #include <QCheckBox>
@@ -107,6 +110,7 @@ SettingsDialog::SettingsDialog(Settings &s, ProviderConfig &runtime, QWidget *pa
     ocrEngine->addItem("Tesseract · 简体中文 / 英文", "tesseract");
 #ifndef Q_OS_WIN
     ocrEngine->addItem("RapidOCR · 简体中文 / 英文", "rapidocr");
+    ocrEngine->addItem("PaddleOCR · PP-OCRv6 Small", "paddleocr");
 #endif
     ocrEngine->setCurrentIndex(qMax(0, ocrEngine->findData(s.value("ocr/engine", "tesseract"))));
     ocr->addRow("识别引擎", ocrEngine);
@@ -153,19 +157,27 @@ SettingsDialog::SettingsDialog(Settings &s, ProviderConfig &runtime, QWidget *pa
     });
     auto *rapidStatus = new QLabel;
     rapidStatus->setWordWrap(true);
+    rapidStatus->setTextFormat(Qt::PlainText);
     rapidStatus->setTextInteractionFlags(Qt::TextSelectableByMouse);
     ocr->addRow(rapidStatus);
     auto showEngineOptions = [ocr, ocrEngine, modelPath, choose, langs, modelStatus, hash, rapidStatus, refreshModels] {
-        const bool rapid = ocrEngine->currentData().toString() == "rapidocr";
+        const auto engine = ocrEngine->currentData().toString();
+        const bool automaticModels = engine != "tesseract";
         for (auto *widget : QList<QWidget *>{modelPath, choose, langs, modelStatus, hash})
-            ocr->setRowVisible(widget, !rapid);
-        ocr->setRowVisible(rapidStatus, rapid);
-        if (rapid) {
-            const auto path = ocrModelRoot() + "/RapidOCR";
-            rapidStatus->setText(QFileInfo(path + "/run-ocr").isExecutable()
-                                     ? "模型目录：" + path
-                                     : "请先在终端运行 python3 tools/setup-rapidocr.py。模型目录：" + path);
-        } else {
+            ocr->setRowVisible(widget, !automaticModels);
+        ocr->setRowVisible(rapidStatus, automaticModels);
+#ifndef Q_OS_WIN
+        if (automaticModels) {
+            const auto profile = engine == "paddleocr" ? RapidOcr::Profile::Paddle : RapidOcr::Profile::Rapid;
+            const auto path = ocrModelRoot() + (profile == RapidOcr::Profile::Paddle ? "/paddleocr" : "/RapidOCR/models");
+            const QFileInfo launcher(RapidOcr::launcher(profile));
+            QString message = "模型目录：" + path;
+            if (!launcher.isFile() || !launcher.isExecutable())
+                message += "\n请先运行 python3 tools/setup-rapidocr.py 准备本地 ONNX 运行环境。";
+            rapidStatus->setText(message);
+        } else
+#endif
+        {
             refreshModels();
         }
     };

@@ -58,6 +58,7 @@ class EditorSession final : public QObject {
     TesseractOcr tesseract;
 #ifndef Q_OS_WIN
     RapidOcr rapidOcr;
+    RapidOcr paddleOcr{RapidOcr::Profile::Paddle};
 #endif
     OpenAiTranslationProvider provider;
     Task currentTask = Task::Idle;

@@ -35,6 +35,8 @@ HTTP 测试服务器仅作为 **测试替身**，生产代码通过 QNetworkAcce
 
 OCR 回归覆盖旧路径失效、英文模型目录遮住中英文模型、`~/` 路径和首次自动复制随附模型。RapidOCR 在 Linux x86-64 的 Python 3.12 和 3.14 独立环境中完成真实模型安装和中英文识别。可在准备 RapidOCR 后运行 `QT_QPA_PLATFORM=offscreen SNAPLING_TEST_RAPIDOCR=1 build/snapling_tests realRapidOcrEngineSwitch`。用例通过设置窗口保存引擎选择，在同一编辑会话中执行 Tesseract → RapidOCR → Tesseract，验证识别文字和原图坐标。可用 `SNAPLING_OCR_HOME` 指向隔离的模型根目录。
 
+额外设置 `SNAPLING_TEST_PADDLEOCR=1` 会加入真实 PP-OCRv6 Small 模型的切换和识别测试。另用旋转 180° 的中英文图片验证了上传的方向模型和对应配置。用户安装采用带空格的临时前缀和临时模型根目录，逐字节比较六个文件，验证再次安装保留已修改文件并补回缺项。DESTDIR 验证系统包带齐相同文件，安装后的辅助脚本可以从包内资源准备用户模型目录。
+
 用户目录安装验证包含带空格的临时前缀：使用真实 Gio.DesktopAppInfo 读取生成的 desktop 文件，并通过该入口以 `--version` 启动已安装程序，检查绝对 Exec 路径、引号和安装 manifest。不要只用文件是否存在代替桌面入口有效性检查。
 
 源码启动验证使用临时 XDG 目录：从没有入口的状态运行 `tools/run.sh --background --exit-after 200`，检查 `desktop_entry_installed=1`；通过真实 Gio 启动生成入口的 `--version`，检查失效入口修复、重复准备、带空格的源码路径，以及准备失败时不会继续启动 Qt。另检查 `--quit`/`--help`/`--version` 不写入口，其他应用入口不变，源码入口忽略打包 `DESTDIR`，正式安装仍保留正确的运行时 Exec 和 manifest。

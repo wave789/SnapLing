@@ -11,7 +11,7 @@ C++20 / Qt6 Widgets 截图工具。提供真实桌面捕获、非破坏性标注
 - 原生或 Portal 全局快捷键、冲突提示、单实例命令转发、托盘和独立启动器入口。
 - 矩形、椭圆、直线、箭头、画笔、荧光笔、文字、序号、马赛克、近似模糊、裁剪、旋转、翻转；标注颜色、线宽、字体、透明度、移动、修改和删除；撤销/重做。
 - `.snapling` 版本化工程保存原图、编辑指令、OCR 和翻译布局；PNG 透明导出、JPG 背景色；异步保存图片。
-- 本地 OCR 支持默认 Tesseract 和 Linux 上可选的 RapidOCR，识别简体中文和英文。识别后可在原图上拖选文字、复制或导出 TXT/Markdown。
+- 本地 OCR 支持默认 Tesseract 和 Linux 上可选的 RapidOCR、PaddleOCR PP-OCRv6 Small。识别后可在原图上拖选文字、复制或导出 TXT/Markdown。
 - Ollama / OpenAI 兼容 HTTP API：供应商配置、环境变量密钥、连接测试、异步翻译、取消、超时、ID 校验、原地译文渲染和图片导出。
 - 简单背景估色覆盖、复杂背景底板、字号自适应、手动调整译文；容纳不了的文字阻止图片导出，工程仍保留完整内容。
 - 贴图、HEX 取色、ZXing 二维码识别、需确认的敏感信息打码建议、可关闭历史、主题与用户登录自动启动。
@@ -64,6 +64,8 @@ Wayland 默认请求非交互式 Screenshot，后台解码完整桌面，按 Qt 
 
 Ubuntu GNOME 的白色闪光是系统截图动画。若要关闭闪光并继续使用默认的单次截图，可在自己的桌面会话里运行 `gsettings set org.gnome.desktop.interface enable-animations false`。该设置也会关闭其他 GNOME 动画。恢复系统默认值时运行 `gsettings reset org.gnome.desktop.interface enable-animations`。
 
+想保留其他界面动画，可以用 GNOME Shell 用户扩展将截图闪光设为透明。[设置方法和对照测试](docs/GNOME_FLASH.md)
+
 即时编辑与高级编辑共享 `Document`、`Canvas` 和 `EditorSession`。OCR、翻译和图片保存异步运行，可在任务执行中继续标注、撤销、复制或进入高级编辑器。错误显示在当前界面的状态提示中。远程翻译通过非阻塞确认控件显示发送目的地。
 
 ## 多显示器（Ubuntu Wayland）
@@ -97,13 +99,15 @@ Ubuntu GNOME 的白色闪光是系统截图动画。若要关闭闪光并继续�
 
 模型默认集中在 `~/.snapling/ocr`。Tesseract 自带中英文模型，首次自动识别时会将所需的随附模型准备到 `~/.snapling/ocr/tesseract`。设置中的模型目录留空即可自动查找。已有自备模型可以继续使用，缺少所选语言的目录会回退到完整的模型目录。来源、许可证、大小和 SHA256 见 [模型说明](models/README.md)。
 
-在 Ubuntu 上启用 RapidOCR 时，需要系统 Python 的 `venv` 模块。可用 `sudo apt install python3-venv` 安装，然后在源码目录运行下面的命令。
+`./tools/install.sh` 会把随项目提供的 PaddleOCR PP-OCRv6 Small 检测、识别和文字方向 ONNX 及各自的 `inference.yml` 放入 `~/.snapling/ocr/paddleocr/{det,rec,cls}`。安装会补齐缺失的文件，保留用户已有的模型文件。
+
+PaddleOCR 和 RapidOCR 复用同一个本地 ONNX 运行环境。Ubuntu 可用 `sudo apt install python3-venv` 准备系统 Python 的虚拟环境组件，然后在源码目录运行下面的命令。
 
 ```bash
 /usr/bin/python3 tools/setup-rapidocr.py
 ```
 
-安装将 RapidOCR、ONNX Runtime 和模型放在 `~/.snapling/ocr/RapidOCR`。完成后在「设置 → OCR → 识别引擎」选 RapidOCR 并保存，下次识别时生效。当前截图已有识别结果时，点击 OCR 重新识别。初次安装需要联网，识别使用本地模型。可以随时切回 Tesseract。通过 DEB 或 CMake 安装时，脚本位于安装前缀下的 `share/snapling/tools/setup-rapidocr.py`。
+脚本使用 `~/.snapling/ocr/RapidOCR` 下的运行环境。此前配置过 RapidOCR 的用户可再运行一次，加入 PaddleOCR 启动器。完成后在「设置 → OCR → 识别引擎」选 **PaddleOCR · PP-OCRv6 Small** 或 RapidOCR 并保存。当前截图已有识别结果时，点击 OCR 重新识别。首次准备运行环境需要联网，模型识别在本地完成。通过 DEB 或 CMake 安装时，脚本位于安装前缀下的 `share/snapling/tools/setup-rapidocr.py`，会为当前用户准备随包提供的 PaddleOCR 模型。
 
 识别后直接拖动图中文字；双击选择连续字词，Ctrl+双击选择整行。「选全部文字」「复制全部文字」「导出文字」可保留换行。行框来自引擎，字符位置依据字宽估算，不代表精准字符检测。OCR 高亮不会写入导出的图片。
 

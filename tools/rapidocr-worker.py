@@ -43,7 +43,9 @@ def install_models(destination):
                     Path(staged.name).unlink(missing_ok=True)
 
 
-def recognize(input_path):
+def rapid_engine():
+    from rapidocr import RapidOCR
+
     models = Path(__file__).resolve().parent / "models"
     params = {"Global.log_level": "error", "EngineConfig.onnxruntime.intra_op_num_threads": 2,
               "EngineConfig.onnxruntime.inter_op_num_threads": 1}
@@ -52,10 +54,12 @@ def recognize(input_path):
         if not path.is_file():
             raise RuntimeError(f"本地模型缺失：{path}。请重新运行 setup-rapidocr.py。")
         params[f"{stage}.model_path"] = str(path)
+    return RapidOCR(params=params)
 
+
+def recognize(input_path, paddle_models=None):
     # Keep the inference pipe machine-readable even if a dependency prints diagnostics.
     with redirect_stdout(sys.stderr):
-        from rapidocr import RapidOCR
         from rapidocr.utils.download_file import DownloadFile
 
         def missing_resource(*args, **kwargs):
@@ -63,7 +67,16 @@ def recognize(input_path):
 
         # The worker is offline even if a replacement model is missing a dictionary.
         DownloadFile.run = missing_resource
-        result = RapidOCR(params=params)(input_path.read_bytes())
+        image_bytes = input_path.read_bytes()
+        if paddle_models is None:
+            result = rapid_engine()(image_bytes)
+        else:
+            # -I excludes the script's directory. Import our installed profile explicitly.
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+            from paddleocr_profile import make_engine
+
+            with make_engine(paddle_models) as engine:
+                result = engine(image_bytes)
 
     if result.boxes is None:
         return []
@@ -76,6 +89,9 @@ def main(args):
         install_models(Path(args[1]))
     elif len(args) == 1:
         print(json.dumps(recognize(Path(args[0])), ensure_ascii=False, allow_nan=False))
+    elif len(args) == 3 and args[0] == "--paddleocr":
+        result = recognize(Path(args[2]), Path(args[1]))
+        print(json.dumps(result, ensure_ascii=False, allow_nan=False))
     else:
         raise ValueError("需要提供一张本地 PNG 图片")
 
