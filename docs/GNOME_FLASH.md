@@ -1,5 +1,15 @@
 # 保留 GNOME 动画并缩短截图等待
 
+## GNOME 快速框选
+
+安装新版 `.deb` 后，若已有旧扩展在运行，注销并重新登录一次。打开 **设置 → 通用**，确认 **单次截图提速** 已启用，再将 **截图方式** 设为 **GNOME 快速框选（松手即编辑）**，保存设置。
+
+在主界面选「整个桌面（全部屏幕）」和「矩形区域」。按快捷键后，GNOME Shell 冻结桌面并显示绿色框。单击选择指针所在的整块屏幕，或按住左键拖动选区。松开左键即进入原位编辑，工具栏跟随选区摆放。Enter 和 ✅ 仍进入独立高级编辑器。
+
+选区出现前，GNOME Shell 只需要生成一张供合成器显示的桌面快照。松手时编码并传输选中的像素。冻结画面保留到编辑器显示首帧，随后所选屏幕继续显示冻结画面及遮罩，其他屏幕恢复实时显示。该模式依赖已启用的 GNOME 48–50 扩展和已安装的 SnapLing。源码目录直接运行的 `./tools/run.sh`、指定单屏和其他截图形状可使用系统单次截图。两种单次截图方式都无需持续屏幕共享。
+
+## 系统单次截图提速
+
 GNOME 的单次截图 Portal 会等截图文件和闪光动画都完成，再把图片交给 SnapLing。此前的透明 CSS 只隐藏白色背景，约 500 毫秒的闪光淡出仍在运行。两个任务并行，因此缩短的时间取决于截图编码与动画的重叠程度。[GNOME 50 截图后端](https://github.com/GNOME/xdg-desktop-portal-gnome/blob/50.0/src/screenshotdialog.c#L247-L255) · [GNOME Shell 50.1 的截图和过渡](https://github.com/GNOME/gnome-shell/blob/50.1/js/ui/screenshot.js#L2668-L2684)
 
 可选扩展跳过 GNOME Shell 单次截图的闪光过渡。第 3 版也跳过 SnapLing 全屏截图覆盖层的窗口动画，其他窗口和桌面仍保留动画。扩展使用 GNOME Shell 的内部方法，版本声明限定在 GNOME 48 至 50。截图授权、取图和快门声仍由系统处理。[GNOME Shell 50.1 窗口入场流程](https://github.com/GNOME/gnome-shell/blob/50.1/js/ui/windowManager.js#L1436-L1488)
@@ -12,7 +22,7 @@ SnapLing 的 `.deb` 已附带提速扩展。安装后可以直接使用默认截
 extension_id='snapling-no-flash@snapling.local'
 extension_dir="${XDG_DATA_HOME:-$HOME/.local/share}/gnome-shell/extensions/$extension_id"
 install -d -- "$extension_dir"
-install -m 644 -- tools/gnome-fast-screenshot/{metadata.json,extension.js,stylesheet.css} "$extension_dir/"
+install -m 644 -- tools/gnome-fast-screenshot/{metadata.json,extension.js,regionSelector.js,screenshotBridge.js,stylesheet.css} "$extension_dir/"
 ```
 
 已经用 `tools/install.sh` 安装的用户，可将上面命令里的 `tools/gnome-fast-screenshot` 替换成 `~/.local/snapling/share/gnome-shell/extensions/snapling-no-flash@snapling.local`。

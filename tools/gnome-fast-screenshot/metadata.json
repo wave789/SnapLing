@@ -1,7 +1,7 @@
 {
   "uuid": "snapling-no-flash@snapling.local",
   "name": "SnapLing Screenshot Acceleration",
-  "description": "Skip the screenshot flash and SnapLing selection overlay transitions",
+  "description": "Accelerate screenshots and select regions inside GNOME Shell",
   "shell-version": ["48", "49", "50"],
-  "version": 3
+  "version": 4
 }

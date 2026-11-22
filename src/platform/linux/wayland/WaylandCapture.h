@@ -19,9 +19,7 @@ class WaylandCapture final : public ICaptureBackend {
     ~WaylandCapture() override;
     void capture(CaptureMode, int screen = -1) override;
     void cancel() override;
-    QString name() const override {
-        return method == Method::Screenshot ? "Wayland · 单次桌面截图" : "Wayland · ScreenCast 兼容截图";
-    }
+    QString name() const override;
     bool hasWindowPicking() const override {
         return false;
     }
@@ -29,19 +27,21 @@ class WaylandCapture final : public ICaptureBackend {
     void stopSharing();
     void resetScreenSelection();
     void resetScreenshotPermission();
-    bool usesScreenshot() const { return method == Method::Screenshot; }
+    bool usesScreenshot(CaptureMode mode, int screen) const;
     void checkScreenshotPermission(std::function<void(bool needsConsent)> callback);
     void authorizeScreenshot();
     bool sharing() const {
         return active;
     }
     QString capabilities() const;
-    enum class Method { Screenshot, ScreenCast };
+    enum class Method { Screenshot, ScreenCast, Compositor };
+    static Method methodFromSetting(const QString &value);
     void setMethod(Method method);
   signals:
     void sharingChanged(bool active);
     void screenshotPermissionReset();
     void screenshotAuthorized();
+    void compositorSelectionCancelled();
   private slots:
     void sessionClosed(const QDBusMessage &message);
 
@@ -49,6 +49,7 @@ class WaylandCapture final : public ICaptureBackend {
     enum class ScreenshotPurpose { Capture, Authorize };
     void portalCapture(ScreenshotPurpose purpose);
     void requestScreenshot(ScreenshotPurpose purpose);
+    void selectInCompositor();
     void lookupScreenshotPermission(std::function<void(QString own, QString host, QString error)> callback);
     void reportScreenshotFailure(ScreenshotPurpose purpose);
     void beginSharing(bool temporary);
@@ -71,6 +72,7 @@ class WaylandCapture final : public ICaptureBackend {
     QElapsedTimer frameWait;
     bool composing = false, allScreens = true;
     bool resettingPermission = false;
+    bool compositorPending = false;
     Method method = Method::Screenshot;
     uint screenCastVersion = 0;
     QString requestedScreen;

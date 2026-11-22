@@ -89,6 +89,8 @@ void addGnomeScreenshotAcceleration(QFormLayout *form) {
                 status->setText("此扩展不支持当前 GNOME 版本。");
             else if (state == 3)
                 status->setText("扩展加载失败。可在 GNOME 扩展应用中查看错误。");
+            else if (active && version >= 4)
+                status->setText("截图提速已启用。可切换到 GNOME 快速框选。");
             else if (active && version >= 3)
                 status->setText("已跳过截图闪光和 SnapLing 选区动画。");
             else if (active)
@@ -142,11 +144,18 @@ SettingsDialog::SettingsDialog(Settings &s, ProviderConfig &runtime, QWidget *pa
     auto *captureMethod = new QComboBox(this);
     captureMethod->addItem("系统单次截图（默认，无持续共享）", "screenshot");
     captureMethod->addItem("兼容截图（需要系统选择共享屏幕，取图后结束）", "screencast");
+    const bool gnome = qEnvironmentVariable("XDG_CURRENT_DESKTOP").split(':').contains("GNOME", Qt::CaseInsensitive);
+    if (gnome) {
+        captureMethod->addItem("GNOME 快速框选（松手即编辑）", "compositor");
+        captureMethod->setItemData(captureMethod->count() - 1,
+                                   "启用截图提速后，在“整个桌面”矩形截图中使用 GNOME 快速框选。",
+                                   Qt::ToolTipRole);
+    }
     captureMethod->setCurrentIndex(qMax(0, captureMethod->findData(s.value("capture/waylandMethod", "screenshot"))));
     if (QGuiApplication::platformName().contains("wayland") || qEnvironmentVariable("XDG_SESSION_TYPE") == "wayland") {
         general->addRow("截图方式", captureMethod);
 #ifndef Q_OS_WIN
-        if (qEnvironmentVariable("XDG_CURRENT_DESKTOP").split(':').contains("GNOME", Qt::CaseInsensitive))
+        if (gnome)
             addGnomeScreenshotAcceleration(general);
 #endif
     } else

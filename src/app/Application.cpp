@@ -177,6 +177,10 @@ Application::Application(QObject *p, std::unique_ptr<ICaptureBackend> captureBac
             if (preparing && consent == Consent::Requesting)
                 prepareDesktopCapture();
         });
+        connect(wayland, &WaylandCapture::compositorSelectionCancelled, this, [this] {
+            cancelCapture();
+            status->setText("截图已取消。");
+        });
         capabilities->setText(capabilities->text() + "\n" + wayland->capabilities());
         auto *regrant = new QPushButton("重新请求截图授权");
         regrant->setObjectName("retryScreenshotPermission");
@@ -408,7 +412,7 @@ void Application::capture(CaptureMode mode, bool ocr, bool translate, int delay,
     pendingScreen = screenBox->currentData().toInt();
 #ifndef Q_OS_WIN
     auto *wayland = qobject_cast<WaylandCapture *>(backend.get());
-    if (wayland && wayland->usesScreenshot() && (explicitConsent || isGnomeSession())) {
+    if (wayland && wayland->usesScreenshot(pendingMode, pendingScreen) && (explicitConsent || isGnomeSession())) {
         consent = Consent::Checking;
         wayland->checkScreenshotPermission([this, job = captureGeneration](bool needsConsent) {
             if (!preparing || job != captureGeneration || consent != Consent::Checking)
@@ -574,6 +578,7 @@ void Application::showCaptureOverlays(CaptureFrame frame) {
             }
     for (qsizetype index = 0; index < views.size(); ++index) {
         auto &view = views[index];
+        const bool compositorSelection = view.hasSelectionViewport();
         auto session = std::make_shared<EditorSession>(QImage(), settings, config);
         const bool activate = index == views.size() - 1;
         const auto token = activate ? captureActivationToken : QString();
@@ -599,8 +604,9 @@ void Application::showCaptureOverlays(CaptureFrame frame) {
             capturing = false;
             restoreWindows();
         });
-        connect(overlay, &SelectionOverlay::ready, this, [this, overlay] {
-            qInfo("trigger_to_selection_ms=%lld screen=%s", captureTimer.elapsed(), qPrintable(overlay->captureScreenName()));
+        connect(overlay, &SelectionOverlay::ready, this, [this, overlay, compositorSelection] {
+            qInfo("%s=%lld screen=%s", compositorSelection ? "trigger_to_quick_edit_ms" : "trigger_to_selection_ms",
+                  captureTimer.elapsed(), qPrintable(overlay->captureScreenName()));
             QTimer::singleShot(250, overlay, [overlay] {
                 auto *window = overlay->windowHandle();
                 qInfo("overlay_exposed=%d active=%d target=%s output=%s size=%dx%d",
@@ -622,7 +628,7 @@ void Application::beginCapture() {
     int screen = pendingScreen;
     if (screen == -2) {
         auto screens = QGuiApplication::screens();
-        screen = screens.indexOf(QGuiApplication::primaryScreen());
+        screen = qMax(0, int(screens.indexOf(QGuiApplication::primaryScreen())));
     }
     backend->capture(pendingMode, screen);
 }
@@ -667,11 +673,11 @@ void Application::settingsDialog() {
         bindHotkeys();
 #ifndef Q_OS_WIN
         if (auto *wayland = qobject_cast<WaylandCapture *>(backend.get())) {
-            const bool compatibility = settings.value("capture/waylandMethod", "screenshot").toString() == "screencast";
+            const auto method = WaylandCapture::methodFromSetting(settings.value("capture/waylandMethod", "screenshot").toString());
             cancelCapture();
-            wayland->setMethod(compatibility ? WaylandCapture::Method::ScreenCast : WaylandCapture::Method::Screenshot);
+            wayland->setMethod(method);
             if (auto *button = main.findChild<QPushButton *>("resetCompatibilityCapture"))
-                button->setVisible(compatibility);
+                button->setVisible(method == WaylandCapture::Method::ScreenCast);
         }
 #endif
     }

@@ -39,6 +39,8 @@ struct CaptureFrame {
     QString screenName;
     qint64 captureMs = 0;
     bool selectionComplete = false; // 已有完整选区；多屏全屏图也用此标记按比例预览。
+    QRectF selectionViewport; // 已由系统框选时，裁图在目标屏幕中的局部逻辑坐标。
+    bool hasSelectionViewport() const;
     QPointF toPixel(QPointF global) const;
     QRect pixelRect(QRectF global) const;
 };

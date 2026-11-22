@@ -35,6 +35,10 @@ HTTP 测试服务器仅作为 **测试替身**，生产代码通过 QNetworkAcce
 
 第 2 版和第 3 版提速扩展在同一 GNOME 48.7 会话中交替测试。第 3 版只匹配本应用的全屏即时截图窗口，三块屏幕均正常显示选区，采样没有白闪。三台 800×600 虚拟屏的首选区可见中位数从 256 毫秒降至 176 毫秒。三台 1920×1080 虚拟屏上的高细节压力测试从 1317 毫秒降至 945 毫秒，其中新版 Portal 返回仍耗时约 665 毫秒。压力测试每版两次，包含命令转发和窗口呈现，实机耗时不宜由此推算。对照实验中，Shell 的交互式 Portal 在同样高细节桌面约 304 毫秒显示首选区，确认后才返回 PNG。这条链路目前用于验证瓶颈，SnapLing 默认仍使用自己的即时编辑选区。
 
+第 4 版增加 GNOME 快速框选。从最终的 DEB 解包运行，在隔离 GNOME Shell/Mutter 48.7 三屏会话中用实际鼠标在第三屏拖选。松开左键后原位显示即时工具栏，裁图及遮罩背景与冻结画面一致，可以直接画箭头并按 Enter 进入高级编辑器保留箭头。也验证了单击选整屏、Esc 取消后重试，以及拒绝普通 `gdbus` 进程发起截图。`capture_flow` 另用私有 D-Bus 和真实文件描述符覆盖负坐标、2× 缩放、取消和无效选区。
+
+从最终 DEB 解包的版本在同一 GNOME 48.7 软件渲染会话、三台 1920×1080 虚拟屏和相同高细节画面下，分别做三次采样。从命令触发到三屏选区可见，中位数为系统单次截图 2049 毫秒、GNOME 快速框选 200 毫秒。一次第三屏拖选在松手 681 毫秒后显示工具栏，此间采样持续呈现冻结画面。此处使用命令触发，物理外接屏及 Ubuntu 26.04 上的系统快捷键和实际耗时仍需实测。
+
 启动对照使用 Ubuntu 26.04 的 Qt 6.10.2 客户端和隔离 GNOME/Mutter 48.7。旧版从终端启动会留下两个未完成的启动通知，约 16 秒后光标才恢复。修复后终端启动无等待光标。使用 GNOME 应用菜单启动时，新版只提交一次已有的启动令牌，主窗口获得焦点，等待光标随启动完成而恢复。
 
 OCR 回归覆盖旧路径失效、英文模型目录遮住中英文模型、`~/` 路径和首次自动复制随附模型。RapidOCR 在 Linux x86-64 的 Python 3.12 和 3.14 独立环境中完成真实模型安装和中英文识别。可在准备 RapidOCR 后运行 `QT_QPA_PLATFORM=offscreen SNAPLING_TEST_RAPIDOCR=1 build/snapling_tests realRapidOcrEngineSwitch`。用例通过设置窗口保存引擎选择，在同一编辑会话中执行 Tesseract → RapidOCR → Tesseract，验证识别文字和原图坐标。可用 `SNAPLING_OCR_HOME` 指向隔离的模型根目录。
@@ -90,6 +94,8 @@ SNAPLING_TEST_WAYLAND=1 QT_QPA_PLATFORM=wayland dbus-run-session -- \
 ## 性能日志
 
 主程序输出 `startup_ms`、`capture_backend`、`capture_ms`、`trigger_to_pixels_ms`、`trigger_to_selection_ms`、`hotkey_ready`、`image_export_ms`、`ocr_ms` 和 `translation_ms`；无正文、密钥或 activation token。选区时间在首个 paint 结束记录，包含屏幕名称；paint 本身不证明合成器显示了窗口，Wayland 专项测试另检查 isExposed。采集和外部授权耗时不能混为一谈。
+
+GNOME 快速框选的 `trigger_to_quick_edit_ms` 包含用户框选用时，到 Qt 首次绘制编辑界面为止。`gnome_selection_ready` 的 `handoff_decode_ms` 只记录 SnapLing 收到裁图后解码的时间。合成器首次选区的可见延迟需从屏幕采样测量。
 
 建议使用 `/usr/bin/time -v` 记录峰值，读取 `/proc/<pid>/status` 的 VmRSS 记录真正空闲时的工作集；Windows 可使用任务管理器/Process Explorer。OCR 冷热测量使用同一实例连续识别两次，单独记录模型加载。持续共享需另测缓存、吞吐与 CPU，不纳入默认后台数据。
 

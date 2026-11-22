@@ -16,6 +16,7 @@
 #include <QDBusObjectPath>
 #include <QDBusUnixFileDescriptor>
 #include <QDBusVariant>
+#include <QFile>
 #include <QFrame>
 #include <QClipboard>
 #include <QPainter>
@@ -205,6 +206,20 @@ class ScreenshotPortal : public QObject, protected QDBusContext {
         return respond(this, options, response, response ? QVariantMap{} : QVariantMap{{"uri", resultUri}}, delay, caller);
     }
 };
+class CompositorSelector : public QObject, protected QDBusContext {
+    Q_OBJECT
+    Q_CLASSINFO("D-Bus Interface", "io.snapling.Screenshot1")
+  public:
+    QDBusMessage pending;
+    int requests = 0, cancellations = 0;
+  public slots:
+    void SelectRegion() {
+        setDelayedReply(true);
+        pending = message();
+        ++requests;
+    }
+    void Cancel() { ++cancellations; }
+};
 class ScreenCastPortal : public QDBusAbstractAdaptor {
     Q_OBJECT
     Q_CLASSINFO("D-Bus Interface", "org.freedesktop.portal.ScreenCast")
@@ -296,6 +311,8 @@ class TestCaptureFlow : public QObject {
     RegistryPortal registry{&screenshot, registryState};
     PermissionStorePortal permissionStore;
     ScreenCastPortal screenCast{&screenshot};
+    CompositorSelector compositor;
+    QDBusConnection compositorBus{QString()};
     QTemporaryDir images;
     QImage image;
     QVector<CaptureScreen> testLayout;
@@ -357,6 +374,11 @@ class TestCaptureFlow : public QObject {
         screenshot.registry = &registryState;
         QVERIFY(bus.registerObject(portalRoot, &screenshot,
             QDBusConnection::ExportAllSlots | QDBusConnection::ExportAllProperties | QDBusConnection::ExportAdaptors));
+        if (!QGuiApplication::platformName().contains("wayland")) {
+            compositorBus = QDBusConnection::connectToBus(QDBusConnection::SessionBus, "snapling-compositor-test");
+            QVERIFY(compositorBus.registerService("org.gnome.Shell"));
+            QVERIFY(compositorBus.registerObject("/io/snapling/Screenshot", &compositor, QDBusConnection::ExportAllSlots));
+        }
         QCOMPARE(PortalRequest::version("org.freedesktop.portal.ScreenCast"), uint(4));
         QVERIFY(images.isValid());
         image = QImage(QGuiApplication::primaryScreen()->size(), QImage::Format_RGB32);
@@ -388,6 +410,8 @@ class TestCaptureFlow : public QObject {
         screenCast.invalidStreams = false;
         screenCast.desktop = {};
         screenCast.nodeList.clear();
+        compositor.pending = {};
+        compositor.requests = compositor.cancellations = 0;
         testLayout = captureScreenLayout();
         screenCast.sourceOptions.clear();
         QSettings().remove("wayland/restoreToken");
@@ -1269,6 +1293,94 @@ class TestCaptureFlow : public QObject {
         QTest::qWait(150);
         QCOMPARE(frames.size(), 1);
     }
+    void compositorReleaseOpensToolbarAtSelectedRegion() {
+        if (!compositorBus.isConnected())
+            QSKIP("使用独立测试总线模拟 GNOME Shell 选择器");
+        qputenv("XDG_CURRENT_DESKTOP", "GNOME");
+        testLayout = {{"built-in", {0, 0, 960, 600}, {}, 1},
+                      {"external-right", {960, 0, 1280, 720}, {}, 1.5},
+                      {"external-left", {-800, -180, 800, 600}, {}, 2}};
+        const auto &target = testLayout.last();
+        const QRect region(128, 95, 292, 176);
+        QImage crop(region.size() * target.devicePixelRatio, QImage::Format_RGB32);
+        crop.fill(QColor("#2458d8"));
+        crop.setPixelColor(3, 7, Qt::magenta);
+        const auto path = images.filePath("compositor.png");
+        QVERIFY(crop.save(path));
+        QFile pixels(path);
+        QVERIFY(pixels.open(QIODevice::ReadOnly));
+
+        auto capture = backend(false);
+        capture->setMethod(WaylandCapture::Method::Compositor);
+        QSignalSpy frames(capture.get(), &ICaptureBackend::captured);
+        QVERIFY(capture->usesScreenshot(CaptureMode::Region, 2));
+        QVERIFY(capture->usesScreenshot(CaptureMode::FullScreen, -1));
+        Application app(nullptr, std::move(capture));
+        app.command({"--capture"});
+        QTRY_COMPARE(compositor.requests, 1);
+        QVERIFY(windows<SelectionOverlay>().isEmpty());
+
+        // Shell 用整个 stage 的左上角作为原点，而 Qt 允许外接屏坐标为负。
+        const QVariantList reply{QVariant::fromValue(QDBusUnixFileDescriptor(pixels.handle())),
+                                 0, 0, 800, 600, region.x(), region.y(), region.width(), region.height()};
+        QVERIFY(compositorBus.send(compositor.pending.createReply(reply)));
+        QTRY_COMPARE(frames.size(), 1);
+        const auto frame = qvariant_cast<CaptureFrame>(frames.first().first());
+        QCOMPARE(frame.screenName, target.name);
+        QCOMPARE(frame.desktop, target.desktop);
+        QCOMPARE(frame.selectionViewport, QRectF(region));
+        QVERIFY(frame.selectionComplete);
+
+        // 合成器收到鼠标松开后发送结果。Qt 收到后就进入即时编辑，不再要求框选或按 Enter。
+        QTRY_COMPARE(windows<SelectionOverlay>().size(), 1);
+        auto *overlay = windows<SelectionOverlay>().first();
+        QCOMPARE(overlay->phase(), SelectionOverlay::Phase::QuickEditing);
+        auto *toolbar = overlay->findChild<QFrame *>("quickToolbar");
+        QVERIFY(toolbar && toolbar->isVisible());
+        QCOMPARE(toolbar->parentWidget(), overlay);
+        QVERIFY(overlay->canvasWidget());
+        QCOMPARE(overlay->canvasWidget()->geometry(), region);
+        QCOMPARE(overlay->session()->document.original().size(), crop.size());
+        QCOMPARE(overlay->session()->document.original().pixelColor(3, 7), Qt::magenta);
+        QVERIFY(windows<EditorWindow>().isEmpty());
+        QVERIFY(screenshot.requests.isEmpty());
+        QCOMPARE(screenCast.created, 0);
+    }
+    void compositorCancelAndMalformedReplyLeaveNoOverlay() {
+        if (!compositorBus.isConnected())
+            QSKIP("使用独立测试总线模拟 GNOME Shell 选择器");
+        auto capture = backend(false);
+        capture->setMethod(WaylandCapture::Method::Compositor);
+        QSignalSpy cancelled(capture.get(), &WaylandCapture::compositorSelectionCancelled);
+        QSignalSpy errors(capture.get(), &ICaptureBackend::failed);
+        Application app(nullptr, std::move(capture));
+        app.show();
+        auto *status = windows<QMainWindow>().first()->findChild<QLabel *>("captureStatus");
+        QVERIFY(status);
+
+        app.command({"--capture"});
+        QTRY_COMPARE(compositor.requests, 1);
+        QVERIFY(compositorBus.send(compositor.pending.createErrorReply("io.snapling.Screenshot1.Cancelled", "Esc")));
+        QTRY_COMPARE(cancelled.size(), 1);
+        QTRY_COMPARE(status->text(), QString("截图已取消。"));
+        QVERIFY(windows<SelectionOverlay>().isEmpty());
+        QVERIFY(errors.isEmpty());
+
+        app.command({"--capture"});
+        QTRY_COMPARE(compositor.requests, 2);
+        QFile pixels(images.filePath("desktop.png"));
+        QVERIFY(pixels.open(QIODevice::ReadOnly));
+        const auto monitor = testLayout.first().desktop.toRect();
+        const QVariantList reply{QVariant::fromValue(QDBusUnixFileDescriptor(pixels.handle())),
+                                 monitor.x(), monitor.y(), monitor.width(), monitor.height(), -1, 0, 20, 20};
+        QVERIFY(compositorBus.send(compositor.pending.createReply(reply)));
+        QTRY_COMPARE(errors.size(), 1);
+        QTRY_COMPARE(compositor.cancellations, 1);
+        QVERIFY(errors.first().first().toString().contains("无法匹配 GNOME 返回的选区"));
+        QVERIFY(windows<SelectionOverlay>().isEmpty());
+        QVERIFY(screenshot.requests.isEmpty());
+        QCOMPARE(screenCast.created, 0);
+    }
     void clickSelectsMonitorAndDragSelectsRegion() {
         for (bool drag : {false, true}) {
             Application app(nullptr, backend(false));
@@ -1394,6 +1506,11 @@ class TestCaptureFlow : public QObject {
         QCOMPARE(screenCast.created, 0);
     }
     void cleanupTestCase() {
+        if (compositorBus.isConnected()) {
+            compositorBus.unregisterObject("/io/snapling/Screenshot");
+            compositorBus.unregisterService("org.gnome.Shell");
+            QDBusConnection::disconnectFromBus("snapling-compositor-test");
+        }
         auto bus = QDBusConnection::sessionBus();
         bus.unregisterObject(portalRoot);
         bus.unregisterService(portalService);

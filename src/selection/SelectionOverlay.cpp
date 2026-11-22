@@ -42,13 +42,16 @@ QImage maskedSelection(const QImage &source, const QPainterPath &path) {
 }
 SelectionOverlay::SelectionOverlay(CaptureFrame f, CaptureMode m, QWidget *parent,
                                    std::shared_ptr<EditorSession> session, QString activationToken, bool activate)
-    : QWidget(parent), frame(std::move(f)), mode(m), editing(std::move(session)) {
+    : QWidget(parent), frame(std::move(f)), anchoredSelection(frame.hasSelectionViewport()), mode(m),
+      editing(std::move(session)) {
     setAttribute(Qt::WA_DeleteOnClose);
     setWindowTitle("SnapLing · 即时截图编辑");
     const bool wayland = QGuiApplication::platformName().contains("wayland");
     setWindowFlags(Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint | (wayland ? Qt::Window : Qt::Tool));
     if (wayland)
         setAttribute(Qt::WA_ShowWithoutActivating);
+    if (anchoredSelection)
+        setAttribute(Qt::WA_TranslucentBackground);
     setMouseTracking(true);
     setCursor(Qt::CrossCursor);
     setFocusPolicy(Qt::StrongFocus);
@@ -69,8 +72,12 @@ SelectionOverlay::SelectionOverlay(CaptureFrame f, CaptureMode m, QWidget *paren
     } else {
         setGeometry(frame.desktop.toAlignedRect());
     }
+    if (anchoredSelection) {
+        selected = frame.image.rect();
+        beginQuickEditing();
+    }
     present(std::move(activationToken), activate);
-    if (mode == CaptureMode::FullScreen || frame.selectionComplete) {
+    if (!anchoredSelection && (mode == CaptureMode::FullScreen || frame.selectionComplete)) {
         selected = frame.image.rect();
         QTimer::singleShot(0, this, &SelectionOverlay::beginQuickEditing);
     }
@@ -92,7 +99,10 @@ void SelectionOverlay::present(QString token, bool activate) {
             raise();
             activateWindow();
         }
-        setFocus();
+        if (canvas)
+            canvas->setFocus();
+        else
+            setFocus();
     }
     if (!token.isEmpty()) {
         if (previous.isNull())
@@ -129,6 +139,13 @@ SelectionOverlay::~SelectionOverlay() {
     }
 }
 QRectF SelectionOverlay::imageViewport() const {
+    if (anchoredSelection) {
+        // On Mutter's physical layout, fullscreen surface geometry can be smaller than the stage coordinates.
+        const qreal sx = width() / frame.desktop.width();
+        const qreal sy = height() / frame.desktop.height();
+        const auto &area = frame.selectionViewport;
+        return {area.x() * sx, area.y() * sy, area.width() * sx, area.height() * sy};
+    }
     if (!frame.selectionComplete)
         return rect();
     const qreal dpr = devicePixelRatioF();
@@ -164,15 +181,22 @@ QPainterPath SelectionOverlay::path() const {
 void SelectionOverlay::paintEvent(QPaintEvent *) {
     QPainter painter(this);
     const auto viewport = imageViewport();
-    painter.fillRect(rect(), QColor("#151b25"));
-    painter.drawImage(viewport, frame.image);
-    painter.fillRect(rect(), QColor(0, 0, 0, 115));
-    painter.save();
-    painter.translate(viewport.topLeft());
-    painter.scale(viewport.width() / frame.image.width(), viewport.height() / frame.image.height());
-    painter.setClipPath(path());
-    painter.drawImage(0, 0, frame.image);
-    painter.restore();
+    if (anchoredSelection) {
+        painter.setCompositionMode(QPainter::CompositionMode_Source);
+        painter.fillRect(rect(), QColor(0, 0, 0, 115));
+        painter.drawImage(viewport, frame.image);
+        painter.setCompositionMode(QPainter::CompositionMode_SourceOver);
+    } else {
+        painter.fillRect(rect(), QColor("#151b25"));
+        painter.drawImage(viewport, frame.image);
+        painter.fillRect(rect(), QColor(0, 0, 0, 115));
+        painter.save();
+        painter.translate(viewport.topLeft());
+        painter.scale(viewport.width() / frame.image.width(), viewport.height() / frame.image.height());
+        painter.setClipPath(path());
+        painter.drawImage(0, 0, frame.image);
+        painter.restore();
+    }
     painter.setPen(QPen(QColor("#0bd18b"), 2));
     const auto selection = selectionGeometry();
     if (!selected.isEmpty()) {
@@ -364,7 +388,7 @@ void SelectionOverlay::wheelEvent(QWheelEvent *e) {
 void SelectionOverlay::beginQuickEditing() {
     if (currentPhase != Phase::Selecting || selected.width() < 1 || selected.height() < 1)
         return;
-    auto image = maskedSelection(frame.image, path());
+    auto image = anchoredSelection ? frame.image : maskedSelection(frame.image, path());
     if (image.isNull())
         return;
     if (!editing)
@@ -384,7 +408,15 @@ void SelectionOverlay::beginQuickEditing() {
     toolbar->raise();
     canvas->setFocus();
     update();
-    emit quickEditingStarted();
+    if (anchoredSelection) {
+        // 编辑器随首帧显示，等 Application 接好信号后再通知进入编辑状态。
+        QTimer::singleShot(0, this, [this] {
+            if (currentPhase == Phase::QuickEditing)
+                emit quickEditingStarted();
+        });
+    } else {
+        emit quickEditingStarted();
+    }
 }
 void SelectionOverlay::createToolbar() {
     toolbar = new QFrame(this);

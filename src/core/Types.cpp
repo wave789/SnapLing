@@ -2,11 +2,18 @@
 #include <QJsonArray>
 #include <QtMath>
 namespace SnapLing {
+bool CaptureFrame::hasSelectionViewport() const {
+    return selectionComplete && !image.isNull() && selectionViewport.isValid() &&
+           qIsFinite(selectionViewport.left()) && qIsFinite(selectionViewport.top()) &&
+           qIsFinite(selectionViewport.right()) && qIsFinite(selectionViewport.bottom()) &&
+           QRectF(QPointF(), desktop.size()).contains(selectionViewport);
+}
 QPointF CaptureFrame::toPixel(QPointF p) const {
-    if (desktop.isEmpty())
+    const auto bounds = hasSelectionViewport() ? selectionViewport.translated(desktop.topLeft()) : desktop;
+    if (bounds.isEmpty())
         return {};
-    return {(p.x() - desktop.x()) * image.width() / desktop.width(),
-            (p.y() - desktop.y()) * image.height() / desktop.height()};
+    return {(p.x() - bounds.x()) * image.width() / bounds.width(),
+            (p.y() - bounds.y()) * image.height() / bounds.height()};
 }
 QRect CaptureFrame::pixelRect(QRectF r) const {
     return QRectF(toPixel(r.topLeft()), toPixel(r.bottomRight())).toAlignedRect().intersected(image.rect());

@@ -11,6 +11,7 @@
 #include <QDBusPendingCallWatcher>
 #include <QDBusPendingReply>
 #include <QDBusUnixFileDescriptor>
+#include <QFile>
 #include <QFutureWatcher>
 #include <QGuiApplication>
 #include <QImageReader>
@@ -20,6 +21,7 @@
 #include <QUrl>
 #include <QUuid>
 #include <QtConcurrent>
+#include <sys/stat.h>
 #include <unistd.h>
 namespace SnapLing {
 static const QString iface = "org.freedesktop.portal.ScreenCast";
@@ -27,6 +29,10 @@ static const QString restoreKey = "wayland/multiScreenRestoreToken";
 static const QString permissionService = "org.freedesktop.impl.portal.PermissionStore";
 static const QString permissionPath = "/org/freedesktop/impl/portal/PermissionStore";
 static const QString applicationId = "io.snapling.SnapLing";
+static const QString compositorInterface = "io.snapling.Screenshot1";
+static QDBusMessage compositorCall(const QString &method) {
+    return QDBusMessage::createMethodCall("org.gnome.Shell", "/io/snapling/Screenshot", compositorInterface, method);
+}
 static bool sameLayout(const QVector<CaptureScreen> &a, const QVector<CaptureScreen> &b) {
     if (a.size() != b.size())
         return false;
@@ -40,8 +46,7 @@ QVector<CaptureScreen> WaylandCapture::currentScreens() const {
 }
 WaylandCapture::WaylandCapture(QObject *p, StreamFactory factory, ScreenProvider screens)
     : ICaptureBackend(p), streamFactory(std::move(factory)), screenProvider(std::move(screens)) {
-    method = Settings().value("capture/waylandMethod", "screenshot").toString() == "screencast"
-                 ? Method::ScreenCast : Method::Screenshot;
+    method = methodFromSetting(Settings().value("capture/waylandMethod", "screenshot").toString());
     frameTimer.setInterval(20);
     connect(&frameTimer, &QTimer::timeout, this, &WaylandCapture::deliverFrame);
     auto changed = [this] {
@@ -66,6 +71,22 @@ WaylandCapture::~WaylandCapture() {
 QString WaylandCapture::capabilities() const {
     return "默认一次捕获完整桌面，在各显示器上冻结画面并直接框选。首次使用可能需要系统截图授权。";
 }
+QString WaylandCapture::name() const {
+    if (method == Method::Compositor)
+        return "Wayland · GNOME 快速框选";
+    return method == Method::Screenshot ? "Wayland · 单次桌面截图" : "Wayland · ScreenCast 兼容截图";
+}
+WaylandCapture::Method WaylandCapture::methodFromSetting(const QString &value) {
+    if (value == "screencast")
+        return Method::ScreenCast;
+    if (value == "compositor")
+        return Method::Compositor;
+    return Method::Screenshot;
+}
+bool WaylandCapture::usesScreenshot(CaptureMode mode, int screen) const {
+    return method == Method::Screenshot ||
+           (method == Method::Compositor && (mode != CaptureMode::Region || screen != -1));
+}
 void WaylandCapture::setMethod(Method value) {
     if (method == value)
         return;
@@ -73,7 +94,7 @@ void WaylandCapture::setMethod(Method value) {
     method = value;
 }
 void WaylandCapture::cancel() {
-    if (temporarySharing || starting || request || resettingPermission)
+    if (temporarySharing || starting || request || resettingPermission || compositorPending)
         resetSharing();
     else {
         ++generation;
@@ -86,7 +107,7 @@ void WaylandCapture::cancel() {
 #endif
     }
 }
-void WaylandCapture::capture(CaptureMode, int screen) {
+void WaylandCapture::capture(CaptureMode mode, int screen) {
     if (capturePending || resettingPermission) {
         emit failed("已有截图请求，请先完成或取消");
         return;
@@ -104,11 +125,17 @@ void WaylandCapture::capture(CaptureMode, int screen) {
     allScreens = screen < 0;
     requestedScreen = allScreens ? QString() : screens[screen].name;
     capturePending = true;
-    if (method == Method::Screenshot) {
+    if (usesScreenshot(mode, screen)) {
         ++generation;
         frameWait.start();
         qInfo("capture_backend=screenshot screens=%lld target=%d", qlonglong(layout.size()), screen);
         portalCapture(ScreenshotPurpose::Capture);
+        return;
+    }
+    if (method == Method::Compositor) {
+        ++generation;
+        frameWait.start();
+        selectInCompositor();
         return;
     }
 #ifdef SNAPLING_HAVE_PIPEWIRE
@@ -139,7 +166,7 @@ void WaylandCapture::checkScreenshotPermission(std::function<void(bool)> callbac
     });
 }
 void WaylandCapture::authorizeScreenshot() {
-    if (!usesScreenshot() || capturePending || resettingPermission || starting) {
+    if (method == Method::ScreenCast || capturePending || resettingPermission || starting) {
         emit failed("当前无法请求截图授权，请先完成或取消正在进行的请求。");
         return;
     }
@@ -152,7 +179,7 @@ void WaylandCapture::portalCapture(ScreenshotPurpose purpose) {
     if (!screenshotConnection) {
         screenshotConnection = std::make_unique<PortalConnection>(applicationId);
         connect(screenshotConnection.get(), &PortalConnection::serviceRestarted, this, [this] {
-            if (capturePending && method == Method::Screenshot)
+            if (capturePending && method != Method::ScreenCast && !compositorPending)
                 failSharing("系统截图服务已重启，请重新截图。");
         });
     }
@@ -270,6 +297,114 @@ void WaylandCapture::requestScreenshot(ScreenshotPurpose purpose) {
             result.frame.desktop = all ? atlas.desktop : result.frame.screens.first().desktop;
             result.frame.image = all ? image : result.frame.screens.first().image;
             return result;
+        }));
+    });
+}
+void WaylandCapture::selectInCompositor() {
+    const auto job = generation;
+    compositorPending = true;
+    qInfo("capture_backend=gnome_compositor screens=%lld", qlonglong(layout.size()));
+    auto *call = new QDBusPendingCallWatcher(
+        QDBusConnection::sessionBus().asyncCall(compositorCall("SelectRegion"), 100000), this);
+    connect(call, &QDBusPendingCallWatcher::finished, this, [this, job, call] {
+        const auto reply = call->reply();
+        call->deleteLater();
+        if (job != generation)
+            return;
+        if (reply.type() == QDBusMessage::ErrorMessage) {
+            const auto error = reply.errorName();
+            if (error == compositorInterface + ".Cancelled") {
+                compositorPending = false;
+                resetSharing();
+                emit compositorSelectionCancelled();
+            } else if (error == compositorInterface + ".NotAllowed") {
+                failSharing("GNOME 快速框选只接受已安装的 SnapLing。请退出旧实例，从安装目录启动新版。");
+            } else if (error == compositorInterface + ".Busy") {
+                failSharing("GNOME 正在进行其他截图或显示系统对话框。请完成后重试。");
+            } else if (error == "org.freedesktop.DBus.Error.UnknownMethod" ||
+                       error == "org.freedesktop.DBus.Error.UnknownObject" ||
+                       error == "org.freedesktop.DBus.Error.UnknownInterface" ||
+                       error == "org.freedesktop.DBus.Error.ServiceUnknown") {
+                failSharing("GNOME 快速框选扩展尚未生效。请在设置 → 通用中启用提速，更新扩展后需重新登录。");
+            } else {
+                failSharing("GNOME 快速框选失败：" + reply.errorMessage().left(240));
+            }
+            return;
+        }
+
+        const auto args = reply.arguments();
+        if (reply.signature() != "hiiiiiiii" || args.size() != 9) {
+            failSharing("GNOME 返回的选区数据无效，请更新 SnapLing 和扩展。");
+            return;
+        }
+        const auto fd = qvariant_cast<QDBusUnixFileDescriptor>(args[0]);
+        const QRectF monitor(args[1].toInt(), args[2].toInt(), args[3].toInt(), args[4].toInt());
+        const QRectF selected(args[5].toInt(), args[6].toInt(), args[7].toInt(), args[8].toInt());
+        if (!fd.isValid() || monitor.isEmpty() || selected.isEmpty() ||
+            !QRectF(QPointF(), monitor.size()).contains(selected) || !sameLayout(layout, currentScreens())) {
+            failSharing("无法匹配 GNOME 返回的选区，请检查显示器连接并重新截图。");
+            return;
+        }
+        QRectF desktop;
+        for (const auto &screen : layout)
+            desktop = desktop.united(screen.desktop);
+        const CaptureScreen *output = nullptr;
+        for (const auto &screen : layout)
+            if (screen.desktop == monitor) {
+                output = &screen;
+                break;
+            }
+        if (!output) {
+            for (const auto &screen : layout)
+                if (screen.desktop.translated(-desktop.topLeft()) == monitor) {
+                    output = &screen;
+                    break;
+                }
+        }
+        if (!output) {
+            failSharing("GNOME 选区所在显示器与 SnapLing 的屏幕布局不匹配，请重新截图。");
+            return;
+        }
+
+        CaptureFrame frame;
+        frame.desktop = output->desktop;
+        frame.screenName = output->name;
+        frame.selectionComplete = true;
+        frame.selectionViewport = selected;
+        QElapsedTimer handoff;
+        handoff.start();
+        auto *reader = new QFutureWatcher<QImage>(this);
+        connect(reader, &QFutureWatcher<QImage>::finished, this, [this, job, reader, frame, handoff]() mutable {
+            frame.image = reader->result();
+            reader->deleteLater();
+            if (job != generation)
+                return;
+            if (frame.image.isNull() || !sameLayout(layout, currentScreens())) {
+                failSharing("无法读取 GNOME 选区，或显示器布局已改变，请重新截图。");
+                return;
+            }
+            compositorPending = false;
+            capturePending = false;
+            frame.captureMs = frameWait.elapsed();
+            qInfo("gnome_selection_ready pixels=%dx%d handoff_decode_ms=%lld screen=%s",
+                  frame.image.width(), frame.image.height(), handoff.elapsed(), qPrintable(frame.screenName));
+            emit captured(std::move(frame));
+        });
+        reader->setFuture(QtConcurrent::run(&workerPool, [fd] {
+            struct stat info {};
+            if (fstat(fd.fileDescriptor(), &info) != 0 || !S_ISREG(info.st_mode) ||
+                info.st_size <= 0 || info.st_size > 512 * 1024 * 1024)
+                return QImage();
+            QFile file;
+            if (!file.open(fd.fileDescriptor(), QIODevice::ReadOnly, QFileDevice::DontCloseHandle) || !file.seek(0))
+                return QImage();
+            QImageReader png(&file, "png");
+            const auto size = png.size();
+            if (size.isEmpty() || qint64(size.width()) * size.height() > 100000000)
+                return QImage();
+            auto image = png.read();
+            image.setDevicePixelRatio(1);
+            return image;
         }));
     });
 }
@@ -695,6 +830,10 @@ void WaylandCapture::failSharing(QString error) {
 void WaylandCapture::resetSharing() {
     resettingPermission = false;
     ++generation;
+    if (compositorPending) {
+        compositorPending = false;
+        QDBusConnection::sessionBus().asyncCall(compositorCall("Cancel"), 2500);
+    }
     frameTimer.stop();
     starting = false;
     temporarySharing = false;

@@ -2,9 +2,12 @@ import {Extension, InjectionManager} from 'resource:///org/gnome/shell/extension
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as Screenshot from 'resource:///org/gnome/shell/ui/screenshot.js';
 
+import {ScreenshotBridge} from './screenshotBridge.js';
+
 export default class SkipScreenshotFlash extends Extension {
     enable() {
         this._injections = new InjectionManager();
+        this._bridge = new ScreenshotBridge(this.path);
         const prototype = Screenshot.Flashspot?.prototype;
         if (typeof prototype?.fire === 'function') {
             this._injections.overrideMethod(prototype, 'fire', original => function(done) {
@@ -33,6 +36,8 @@ export default class SkipScreenshotFlash extends Extension {
     }
 
     disable() {
+        this._bridge?.destroy();
+        this._bridge = null;
         this._injections?.clear();
         this._injections = null;
     }

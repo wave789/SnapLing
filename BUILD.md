@@ -52,7 +52,7 @@ Wayland 默认使用非交互式 Screenshot Portal，支持单次完整桌面和
 
 生成便携目录、tar.gz 和 DEB。便携入口设置相对库、插件和模型路径，附带可替换的动态库及许可证。DEB 使用目标发行版的运行库，`dpkg-shlibdeps` 根据实际构建生成依赖。只打 DEB 时可以运行 `(cd build && umask 022 && cpack -G DEB)`。
 
-DEB 同时安装可选的 GNOME 截图提速扩展。`dpkg -i` 安装完成后可以直接用默认单次截图。在 SnapLing 的「设置 → 通用 → 单次截图提速」中可点击「启用」。GNOME 在新会话中发现新扩展，若当前会话未找到，可注销重新登录一次。新系统缺少 DEB 运行依赖时，用 `apt install ./<安装包>.deb` 让 apt 一并解决。操作方法见 [GNOME 截图提速](docs/GNOME_FLASH.md)。
+DEB 同时安装可选的 GNOME 截图提速扩展。`dpkg -i` 安装完成后可以直接用默认单次截图。若要使用 GNOME 快速框选，在 SnapLing 的「设置 → 通用」中启用「单次截图提速」，再选择「GNOME 快速框选（松手即编辑）」。首次安装或升级扩展后，可注销重新登录以加载新代码。新系统缺少 DEB 运行依赖时，用 `apt install ./<安装包>.deb` 让 apt 一并解决。操作方法见 [GNOME 截图提速](docs/GNOME_FLASH.md)。
 
 从源码运行或用户安装切换到 DEB 时，GNOME 可能会优先使用旧的用户桌面入口。可先退出正在运行的 SnapLing，再执行 `/usr/bin/snapling` 打开包内版本。
 
