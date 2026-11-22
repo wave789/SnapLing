@@ -217,9 +217,12 @@ class CompositorSelector : public QObject, protected QDBusContext {
     Q_CLASSINFO("D-Bus Interface", "io.snapling.Screenshot1")
   public:
     QDBusMessage pending;
-    int requests = 0, cancellations = 0;
+    int requests = 0, cancellations = 0, versions = 0;
   public slots:
-    uint GetVersion() { return 3; }
+    uint GetVersion() {
+        ++versions;
+        return 3;
+    }
     void SelectRegion() {
         setDelayedReply(true);
         pending = message();
@@ -418,7 +421,7 @@ class TestCaptureFlow : public QObject {
         screenCast.desktop = {};
         screenCast.nodeList.clear();
         compositor.pending = {};
-        compositor.requests = compositor.cancellations = 0;
+        compositor.requests = compositor.cancellations = compositor.versions = 0;
         testLayout = captureScreenLayout();
         screenCast.sourceOptions.clear();
         QSettings().remove("wayland/restoreToken");
@@ -1408,6 +1411,7 @@ class TestCaptureFlow : public QObject {
 
         app.command({"--capture"});
         QTRY_COMPARE(compositor.requests, 2);
+        QCOMPARE(compositor.versions, 1);
         QFile pixels(images.filePath("desktop.png"));
         QVERIFY(pixels.open(QIODevice::ReadOnly));
         const auto monitor = testLayout.first().desktop.toRect();
@@ -1421,6 +1425,24 @@ class TestCaptureFlow : public QObject {
         QVERIFY(windows<SelectionOverlay>().isEmpty());
         QVERIFY(screenshot.requests.isEmpty());
         QCOMPARE(screenCast.created, 0);
+    }
+    void compositorIdentityRejectionDoesNotSilentlyFallbackToPortal() {
+        if (!compositorBus.isConnected())
+            QSKIP("使用独立测试总线模拟 GNOME Shell 选择器");
+        auto capture = backend(false);
+        capture->setMethod(WaylandCapture::Method::Compositor);
+        Application app(nullptr, std::move(capture));
+        auto *main = windows<QMainWindow>().first();
+        auto *status = main->findChild<QLabel *>("captureStatus");
+        QVERIFY(status);
+        app.command({"--capture"});
+        QTRY_COMPARE(compositor.requests, 1);
+        QVERIFY(compositorBus.send(
+            compositor.pending.createErrorReply("io.snapling.Screenshot1.NotAllowed", "rejected")));
+        QTRY_VERIFY(status->text().contains("拒绝当前可执行文件身份"));
+        QTest::qWait(100);
+        QVERIFY(screenshot.requests.isEmpty());
+        QVERIFY(windows<SelectionOverlay>().isEmpty());
     }
     void clickSelectsMonitorAndDragSelectsRegion() {
         for (bool drag : {false, true}) {

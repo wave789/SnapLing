@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(SnapLing VERSION 0.3.4 LANGUAGES CXX)
+project(SnapLing VERSION 0.5.4 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
@@ -15,7 +15,7 @@ option(SNAPLING_TESSERACT "仅供历史回归启用的 Tesseract OCR" OFF)
 set(SNAPLING_PADDLE_RUNTIME_DIR "${CMAKE_BINARY_DIR}/paddleocr-runtime" CACHE PATH
     "随 DEB 和便携包分发的 PaddleOCR 推理运行环境")
 set(SOURCES
- src/platform/Autostart.cpp src/core/Types.cpp src/capture/CaptureService.cpp src/hotkey/Hotkey.cpp
+ src/platform/Autostart.cpp src/platform/SecretStore.cpp src/core/Types.cpp src/capture/CaptureService.cpp src/hotkey/Hotkey.cpp
  src/selection/SelectionOverlay.cpp src/editor/Document.cpp src/editor/Canvas.cpp
  src/editor/EditorSession.cpp src/editor/AnnotationTools.cpp
  src/ocr/OcrEngine.cpp src/ocr/TextLayout.cpp src/translation/TranslationProvider.cpp
@@ -159,6 +159,6 @@ set(CPACK_PACKAGE_NAME snapling)
 set(CPACK_PACKAGE_VERSION ${PROJECT_VERSION})
 set(CPACK_PACKAGE_CONTACT "SnapLing contributors")
 set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
-set(CPACK_DEBIAN_PACKAGE_DEPENDS "qt6-qpa-plugins, qt6-gtk-platformtheme, qt6-wayland, fonts-noto-cjk, python3")
+set(CPACK_DEBIAN_PACKAGE_DEPENDS "qt6-qpa-plugins, qt6-gtk-platformtheme, qt6-wayland, fonts-noto-cjk, libsecret-tools, gnome-keyring, python3")
 set(CPACK_NSIS_DISPLAY_NAME "SnapLing")
 include(CPack)

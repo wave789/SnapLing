@@ -7,19 +7,29 @@
 #include "ocr/OcrEngine.h"
 #include "ocr/RapidOcr.h"
 #include "ocr/TextLayout.h"
+#include "platform/SecretStore.h"
 #include "selection/SelectionOverlay.h"
 #include "settings/Settings.h"
 #include "translation/TranslationProvider.h"
 #include "ui/EditorWindow.h"
 #include "ui/SettingsDialog.h"
+#ifndef Q_OS_WIN
+#include "platform/linux/wayland/WaylandCapture.h"
+#endif
 #include <QAction>
+#include <QCryptographicHash>
 #include <QComboBox>
 #include <QDialogButtonBox>
+#include <QBuffer>
+#include <QDataStream>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QImageReader>
 #include <QLabel>
+#include <QLineEdit>
 #include <QMessageBox>
 #include <QPainter>
 #include <QPushButton>
@@ -29,6 +39,8 @@
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QTemporaryDir>
+#include <QTimer>
+#include <QUrlQuery>
 #include <QtTest>
 using namespace SnapLing;
 class TestCore : public QObject {
@@ -285,6 +297,70 @@ class TestCore : public QObject {
         QCOMPARE(mapped[0].box, t.mapRect(l.box));
         QCOMPARE(mapped[0].polygon, t.map(l.polygon));
     }
+    void rawTextureBmpCanBeDecoded() {
+        QByteArray bytes;
+        QDataStream stream(&bytes, QIODevice::WriteOnly);
+        stream.setByteOrder(QDataStream::LittleEndian);
+        const quint16 magic = 0x4d42;
+        const quint32 fileSize = 54 + 16, offset = 54, infoSize = 40, imageSize = 16;
+        const qint32 width = 2, height = -2, resolution = 2835;
+        stream << magic << fileSize << quint32(0) << offset << infoSize << width << height;
+        stream << quint16(1) << quint16(32) << quint32(0) << imageSize << resolution << resolution;
+        stream << quint32(0) << quint32(0);
+        QVERIFY(stream.status() == QDataStream::Ok);
+        const QByteArray pixels = QByteArray::fromHex("0000ffff00ff00ffff0000ffffffffff");
+        QCOMPARE(pixels.size(), 16);
+        bytes += pixels;
+        QBuffer buffer(&bytes);
+        QVERIFY(buffer.open(QIODevice::ReadOnly));
+        QImageReader reader(&buffer);
+        QVERIFY2(reader.canRead(), qPrintable(reader.errorString()));
+        const auto image = reader.read();
+        QVERIFY(!image.isNull());
+        QCOMPARE(image.size(), QSize(2, 2));
+    }
+    void rawTextureContainerCanBeDecoded() {
+#ifndef Q_OS_WIN
+        QByteArray bytes;
+        QDataStream stream(&bytes, QIODevice::WriteOnly);
+        stream.setByteOrder(QDataStream::LittleEndian);
+        stream.writeRawData("SNRAW1", 6);
+        stream << quint16(1) << qint32(2) << qint32(2) << qint32(8) << quint32(2) << quint64(16);
+        const QByteArray pixels = QByteArray::fromHex("0000ff0000ff0000000000ff00000000");
+        QCOMPARE(pixels.size(), 16);
+        bytes += pixels;
+        QBuffer buffer(&bytes);
+        QVERIFY(buffer.open(QIODevice::ReadOnly));
+        QString error;
+        const auto image = WaylandCapture::decodeCaptureImage(buffer, error);
+        QVERIFY2(!image.isNull(), qPrintable(error));
+        QCOMPARE(image.size(), QSize(2, 2));
+        QCOMPARE(image.pixelColor(0, 0), QColor(Qt::red));
+        QCOMPARE(image.pixelColor(1, 0), QColor(Qt::green));
+#else
+        QSKIP("Wayland raw texture container is Linux-only");
+#endif
+    }
+    void legacyRawTextureAlphaDoesNotHideScreenshot() {
+#ifndef Q_OS_WIN
+        QByteArray bytes;
+        QDataStream stream(&bytes, QIODevice::WriteOnly);
+        stream.setByteOrder(QDataStream::LittleEndian);
+        stream.writeRawData("SNRAW1", 6);
+        stream << quint16(1) << qint32(2) << qint32(1) << qint32(8) << quint32(1) << quint64(8);
+        const QByteArray pixels = QByteArray::fromHex("0000ffff00ff0000");
+        bytes += pixels;
+        QBuffer buffer(&bytes);
+        QVERIFY(buffer.open(QIODevice::ReadOnly));
+        QString error;
+        const auto image = WaylandCapture::decodeCaptureImage(buffer, error);
+        QVERIFY2(!image.isNull(), qPrintable(error));
+        QCOMPARE(image.pixelColor(0, 0), QColor(Qt::red));
+        QCOMPARE(image.pixelColor(1, 0), QColor(Qt::green));
+#else
+        QSKIP("Wayland raw texture container is Linux-only");
+#endif
+    }
     void translationJsonIdMatching() {
         auto u = units();
         QString error;
@@ -309,6 +385,107 @@ class TestCore : public QObject {
         QVERIFY(!OpenAiTranslationProvider::parse(
             "<think>{\"translations\":[{\"id\":\"a\",\"text\":\"思考内容\"}]}", invalid, error));
         QVERIFY(invalid[0].target.isEmpty());
+    }
+    void baiduResponseParsingAndErrors() {
+        QVector<TranslationUnit> units{
+            {"a", "Hello", {}, "zh", "pending", {10, 10, 100, 20}},
+            {"b", "World", {}, "zh", "pending", {10, 40, 100, 20}}};
+        QString error;
+        QVERIFY2(BaiduTranslationProvider::parseResponse(
+                     R"({"from":"en","to":"zh","trans_result":[{"src":"Hello","dst":"你好"},{"src":"World","dst":"世界"}]})",
+                     units, error),
+                 qPrintable(error));
+        QCOMPARE(units[0].target, QString("你好"));
+        QCOMPARE(units[1].target, QString("世界"));
+        QCOMPARE(units[0].status, QString("done"));
+        QVERIFY(!BaiduTranslationProvider::parseResponse(
+            R"({"error_code":"54001","error_msg":"Invalid Sign"})", units, error));
+        QVERIFY(error.contains("签名"));
+        QCOMPARE(BaiduTranslationProvider::languageCode("简体中文"), QString("zh"));
+        QCOMPARE(BaiduTranslationProvider::languageCode("English"), QString("en"));
+        QCOMPARE(BaiduTranslationProvider::languageCode("日语"), QString("jp"));
+    }
+    void baiduRequestSigningAndTranslation() {
+        QTcpServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost));
+        QString signatureError;
+        QByteArray receivedAppId;
+        connect(&server, &QTcpServer::newConnection, this, [&] {
+            auto *socket = server.nextPendingConnection();
+            socket->setProperty("request", QByteArray{});
+            connect(socket, &QTcpSocket::readyRead, socket, [&, socket] {
+                auto bytes = socket->property("request").toByteArray() + socket->readAll();
+                socket->setProperty("request", bytes);
+                const int boundary = bytes.indexOf("\r\n\r\n");
+                if (boundary < 0 || socket->property("responded").toBool())
+                    return;
+                const auto headers = bytes.left(boundary);
+                auto match = QRegularExpression("Content-Length: ([0-9]+)",
+                                                QRegularExpression::CaseInsensitiveOption)
+                                 .match(QString::fromLatin1(headers));
+                if (!match.hasMatch() || bytes.size() < boundary + 4 + match.captured(1).toInt())
+                    return;
+                socket->setProperty("responded", true);
+                const auto body = bytes.mid(boundary + 4, match.captured(1).toInt());
+                const QUrlQuery form(QString::fromUtf8(body));
+                receivedAppId = form.queryItemValue("appid", QUrl::FullyDecoded).toUtf8();
+                const auto query = form.queryItemValue("q", QUrl::FullyDecoded);
+                const auto salt = form.queryItemValue("salt", QUrl::FullyDecoded);
+                const auto sign = form.queryItemValue("sign", QUrl::FullyDecoded);
+                const auto expected = QString::fromLatin1(
+                    QCryptographicHash::hash(("app-id" + query + salt + "secret-key").toUtf8(),
+                                             QCryptographicHash::Md5)
+                        .toHex());
+                if (query != "Hello\nWorld" || form.queryItemValue("from") != "auto" ||
+                    form.queryItemValue("to") != "zh" || sign != expected)
+                    signatureError = "Bad Baidu form: " + query + " / " + sign;
+                const auto response = QByteArray(
+                    R"({"from":"en","to":"zh","trans_result":[{"src":"Hello","dst":"你好"},{"src":"World","dst":"世界"}]})");
+                socket->write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " +
+                              QByteArray::number(response.size()) + "\r\nConnection: close\r\n\r\n" + response);
+                socket->disconnectFromHost();
+            });
+            connect(socket, &QTcpSocket::disconnected, socket, &QObject::deleteLater);
+        });
+        ProviderConfig config;
+        config.backend = TranslationBackend::BaiduGeneral;
+        config.baseUrl = QString("http://127.0.0.1:%1/translate").arg(server.serverPort());
+        config.appId = "app-id";
+        config.keyEnv.clear();
+        config.sessionKey = "secret-key";
+        config.targetLanguage = "简体中文";
+        BaiduTranslationProvider provider;
+        QSignalSpy done(&provider, &ITranslationProvider::completed);
+        QSignalSpy errors(&provider, &ITranslationProvider::failed);
+        provider.translate(units(), config);
+        QTRY_VERIFY_WITH_TIMEOUT(!done.isEmpty() || !errors.isEmpty(), 5000);
+        QVERIFY2(errors.isEmpty(), errors.isEmpty() ? "" : qPrintable(errors.first().first().toString()));
+        QVERIFY2(signatureError.isEmpty(), qPrintable(signatureError));
+        QCOMPARE(receivedAppId, QByteArray("app-id"));
+        const auto translated = qvariant_cast<QVector<TranslationUnit>>(done.first().first());
+        QCOMPARE(translated.size(), 2);
+        QCOMPARE(translated[0].target, QString("你好"));
+        QCOMPARE(translated[1].target, QString("世界"));
+    }
+    void baiduTranslationDoesNotRequestSecondConfirmation() {
+        QTemporaryDir tmp;
+        Settings settings(tmp.filePath("settings.ini"));
+        ProviderConfig config;
+        config.backend = TranslationBackend::BaiduGeneral;
+        config.appId = "configured-app-id";
+        config.baseUrl = "http://127.0.0.1:1/translate";
+        config.keyEnv.clear();
+        config.sessionKey.clear();
+        QImage image(300, 80, QImage::Format_RGB32);
+        image.fill(Qt::white);
+        EditorSession session(image, settings, config);
+        session.document.change([](auto &state) {
+            state.ocr = {{"line_0", "Translate this", {10, 10, 180, 20}, {}, .9}};
+        });
+        QSignalSpy approval(&session, &EditorSession::translationApprovalRequested);
+        session.toggleTranslation();
+        QCOMPARE(approval.size(), 0);
+        QTRY_COMPARE_WITH_TIMEOUT(session.task(), EditorSession::Task::Idle, 4000);
     }
     void automaticTranslationConfidenceThresholdIsQuarter() {
         const QVector<OcrLine> lines{
@@ -335,6 +512,11 @@ class TestCore : public QObject {
         auto fit = fitTranslation("你好，世界", {10, 10, 140, 35}, {300, 200});
         QVERIFY(!fit.overflow);
         QVERIFY(fit.font.pixelSize() >= 8);
+        auto tight = fitTranslation("打开项目", {20, 30, 100, 12}, {300, 200}, 12);
+        QVERIFY(!tight.overflow);
+        QCOMPARE(tight.font.pixelSize(), 12);
+        QVERIFY(tight.box.height() >= 12);
+        QCOMPARE(tight.box.top(), 30.);
         auto longFit = fitTranslation(QString(10000, QChar(0x4e2d)), {0, 0, 10, 10}, {40, 20});
         QVERIFY(longFit.overflow);
         Document doc(sample());
@@ -413,6 +595,8 @@ class TestCore : public QObject {
             Settings settings(path);
             settings.set("hotkey/capture", "Ctrl+Shift+F8");
             ProviderConfig p;
+            p.backend = TranslationBackend::BaiduGeneral;
+            p.appId = "baidu-app-id";
             p.sessionKey = "secret-must-not-persist";
             p.model = "test";
             settings.saveProvider(p);
@@ -420,11 +604,224 @@ class TestCore : public QObject {
         Settings settings(path);
         QCOMPARE(settings.value("schemaVersion").toInt(), 2);
         QCOMPARE(settings.provider().model, QString("test"));
+        QCOMPARE(settings.provider().backend, TranslationBackend::BaiduGeneral);
+        QCOMPARE(settings.provider().appId, QString("baidu-app-id"));
         QVERIFY(settings.provider().sessionKey.isEmpty());
         QFile f(path);
         QVERIFY(f.open(QIODevice::ReadOnly));
         QVERIFY(!f.readAll().contains("secret-must-not-persist"));
         QCOMPARE(settings.value("hotkey/capture").toString(), QString("Ctrl+Shift+F8"));
+    }
+    void baiduProviderCanBeSavedWithoutPersistingSecret() {
+        QTemporaryDir tmp;
+        Settings settings(tmp.filePath("settings.ini"));
+        ProviderConfig config;
+        SettingsDialog dialog(settings, config);
+        auto *backend = dialog.findChild<QComboBox *>("translationBackend");
+        auto *appId = dialog.findChild<QLineEdit *>("baiduAppId");
+        auto *name = dialog.findChild<QLineEdit *>("translationProviderName");
+        auto *env = dialog.findChild<QLineEdit *>("translationKeyEnv");
+        auto *secret = dialog.findChild<QLineEdit *>("translationSecret");
+        auto *profiles = dialog.findChild<QComboBox *>("translationProfiles");
+        QVERIFY(backend && appId && name && env && secret && profiles);
+        const int index = backend->findData(int(TranslationBackend::BaiduGeneral));
+        QVERIFY(index >= 0);
+        backend->setCurrentIndex(index);
+        QVERIFY(QMetaObject::invokeMethod(backend, "activated", Qt::DirectConnection, Q_ARG(int, index)));
+        name->setText("我的百度翻译");
+        appId->setText("saved-app-id");
+        env->setText("BAIDU_TRANSLATE_SECRET_KEY");
+        secret->setText("session-secret");
+        QPushButton *remember = nullptr;
+        for (auto *button : dialog.findChildren<QPushButton *>())
+            if (button->text() == "添加 / 更新供应商")
+                remember = button;
+        QVERIFY(remember);
+        remember->click();
+        QCOMPARE(profiles->count(), 1);
+
+        appId->clear();
+        profiles->setCurrentIndex(0);
+        QVERIFY(QMetaObject::invokeMethod(profiles, "activated", Qt::DirectConnection, Q_ARG(int, 0)));
+        QCOMPARE(appId->text(), QString("saved-app-id"));
+        secret->setText("session-secret");
+        auto *buttons = dialog.findChild<QDialogButtonBox *>();
+        QVERIFY(buttons);
+        buttons->button(QDialogButtonBox::Save)->click();
+        QCOMPARE(dialog.result(), int(QDialog::Accepted));
+        QCOMPARE(config.backend, TranslationBackend::BaiduGeneral);
+        QCOMPARE(config.appId, QString("saved-app-id"));
+        QCOMPARE(config.sessionKey, QString("session-secret"));
+        QCOMPARE(Settings(tmp.filePath("settings.ini")).provider().appId, QString("saved-app-id"));
+        QVERIFY(Settings(tmp.filePath("settings.ini")).provider().sessionKey.isEmpty());
+    }
+    void systemCredentialStoreRoundTrip() {
+        QTemporaryDir tmp;
+        const auto state = tmp.filePath("stored-secret");
+        QFile tool(tmp.filePath("secret-tool"));
+        QVERIFY(tool.open(QIODevice::WriteOnly));
+        const auto script =
+            QString("#!/bin/sh\n"
+                    "state='%1'\n"
+                    "case \"$1\" in\n"
+                    "  store) cat > \"$state\" ;;\n"
+                    "  lookup) [ -f \"$state\" ] && cat \"$state\" ;;\n"
+                    "  clear) rm -f \"$state\" ;;\n"
+                    "esac\n")
+                .arg(state);
+        QCOMPARE(tool.write(script.toUtf8()), qint64(script.toUtf8().size()));
+        tool.close();
+        QVERIFY(QFile::setPermissions(tmp.filePath("secret-tool"),
+                                      QFileDevice::ReadOwner | QFileDevice::WriteOwner |
+                                          QFileDevice::ExeOwner));
+        const auto oldPath = qEnvironmentVariable("PATH");
+        const auto restore = qScopeGuard([oldPath] { qputenv("PATH", oldPath.toUtf8()); });
+        qputenv("PATH", (tmp.path() + ":" + oldPath).toUtf8());
+        QVERIFY(SecretStore::available());
+        QVERIFY(SecretStore::store("test-key", "encrypted-by-system"));
+        QCOMPARE(SecretStore::load("test-key"), QString("encrypted-by-system"));
+        QVERIFY(SecretStore::store("baidu-general-secret", "cached-baidu-key"));
+        Settings settings(tmp.filePath("settings.ini"));
+        ProviderConfig config;
+        config.backend = TranslationBackend::BaiduGeneral;
+        SettingsDialog dialog(settings, config);
+        auto *secret = dialog.findChild<QLineEdit *>("translationSecret");
+        QVERIFY(secret);
+        QCOMPARE(secret->text(), QString("cached-baidu-key"));
+        QVERIFY(SecretStore::remove("test-key"));
+        QVERIFY(SecretStore::load("test-key").isEmpty());
+    }
+    void baiduTranslationLoadsKeyringAfterRestart() {
+        QTemporaryDir tmp;
+        const auto state = tmp.filePath("stored-secret");
+        QFile tool(tmp.filePath("secret-tool"));
+        QVERIFY(tool.open(QIODevice::WriteOnly));
+        const auto script =
+            QString("#!/bin/sh\n"
+                    "state='%1'\n"
+                    "case \"$1\" in\n"
+                    "  store) cat > \"$state\" ;;\n"
+                    "  lookup) [ -f \"$state\" ] && cat \"$state\" ;;\n"
+                    "  clear) rm -f \"$state\" ;;\n"
+                    "esac\n")
+                .arg(state);
+        QCOMPARE(tool.write(script.toUtf8()), qint64(script.toUtf8().size()));
+        tool.close();
+        QVERIFY(QFile::setPermissions(tmp.filePath("secret-tool"),
+                                      QFileDevice::ReadOwner | QFileDevice::WriteOwner |
+                                          QFileDevice::ExeOwner));
+        const auto oldPath = qEnvironmentVariable("PATH");
+        const auto oldSecret = qEnvironmentVariable("BAIDU_TRANSLATE_SECRET_KEY");
+        const auto restore = qScopeGuard([oldPath, oldSecret] {
+            qputenv("PATH", oldPath.toUtf8());
+            if (oldSecret.isEmpty())
+                qunsetenv("BAIDU_TRANSLATE_SECRET_KEY");
+            else
+                qputenv("BAIDU_TRANSLATE_SECRET_KEY", oldSecret.toUtf8());
+        });
+        qputenv("PATH", (tmp.path() + ":" + oldPath).toUtf8());
+        qunsetenv("BAIDU_TRANSLATE_SECRET_KEY");
+        QVERIFY(SecretStore::store(SecretStore::baiduTranslationCredential(), "cached-secret"));
+
+        Settings settings(tmp.filePath("settings.ini"));
+        ProviderConfig config;
+        config.backend = TranslationBackend::BaiduGeneral;
+        config.appId = "configured-app";
+        config.baseUrl = "http://127.0.0.1:1/translate";
+        config.keyEnv = "BAIDU_TRANSLATE_SECRET_KEY";
+        config.timeoutSeconds = 1;
+        QImage image(300, 80, QImage::Format_RGB32);
+        image.fill(Qt::white);
+        EditorSession session(image, settings, config);
+        session.document.change([](auto &state) {
+            state.ocr = {{"line_0", "Translate this", {10, 10, 180, 20}, {}, .9}};
+        });
+        session.toggleTranslation();
+        QTRY_VERIFY_WITH_TIMEOUT(session.config.sessionKey == QString("cached-secret"), 2000);
+        QTRY_COMPARE_WITH_TIMEOUT(session.task(), EditorSession::Task::Idle, 3000);
+        QVERIFY(!session.message().contains("请填写百度翻译 AppID 和密钥"));
+    }
+    void baiduSettingsTestButtonUsesEnteredCredentials() {
+        QTcpServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost));
+        QByteArray receivedAppId;
+        QString signatureError;
+        connect(&server, &QTcpServer::newConnection, this, [&] {
+            auto *socket = server.nextPendingConnection();
+            socket->setProperty("request", QByteArray{});
+            connect(socket, &QTcpSocket::readyRead, socket, [&, socket] {
+                auto bytes = socket->property("request").toByteArray() + socket->readAll();
+                socket->setProperty("request", bytes);
+                const int boundary = bytes.indexOf("\r\n\r\n");
+                if (boundary < 0 || socket->property("responded").toBool())
+                    return;
+                const auto match = QRegularExpression("Content-Length: ([0-9]+)",
+                                                      QRegularExpression::CaseInsensitiveOption)
+                                       .match(QString::fromLatin1(bytes.left(boundary)));
+                if (!match.hasMatch() || bytes.size() < boundary + 4 + match.captured(1).toInt())
+                    return;
+                socket->setProperty("responded", true);
+                const auto body = bytes.mid(boundary + 4, match.captured(1).toInt());
+                const QUrlQuery form(QString::fromUtf8(body));
+                receivedAppId = form.queryItemValue("appid", QUrl::FullyDecoded).toUtf8();
+                const auto expected = QString::fromLatin1(
+                    QCryptographicHash::hash(("ui-app-id" + form.queryItemValue("q", QUrl::FullyDecoded) +
+                                              form.queryItemValue("salt", QUrl::FullyDecoded) +
+                                              "ui-secret")
+                                                 .toUtf8(),
+                                             QCryptographicHash::Md5)
+                        .toHex());
+                if (form.queryItemValue("sign", QUrl::FullyDecoded) != expected)
+                    signatureError = "UI test request did not use the entered secret";
+                const auto response =
+                    QByteArray(R"({"from":"en","to":"zh","trans_result":[{"src":"Hello","dst":"你好"}]})");
+                socket->write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " +
+                              QByteArray::number(response.size()) + "\r\nConnection: close\r\n\r\n" + response);
+                socket->disconnectFromHost();
+            });
+            connect(socket, &QTcpSocket::disconnected, socket, &QObject::deleteLater);
+        });
+        const auto previousEndpoint = qEnvironmentVariable("SNAPLING_BAIDU_ENDPOINT");
+        const auto restore = qScopeGuard([previousEndpoint] {
+            if (previousEndpoint.isEmpty())
+                qunsetenv("SNAPLING_BAIDU_ENDPOINT");
+            else
+                qputenv("SNAPLING_BAIDU_ENDPOINT", previousEndpoint.toUtf8());
+        });
+        qputenv("SNAPLING_BAIDU_ENDPOINT",
+                QString("http://127.0.0.1:%1/translate").arg(server.serverPort()).toUtf8());
+        QTemporaryDir tmp;
+        Settings settings(tmp.filePath("settings.ini"));
+        ProviderConfig config;
+        SettingsDialog dialog(settings, config);
+        auto *backend = dialog.findChild<QComboBox *>("translationBackend");
+        auto *appId = dialog.findChild<QLineEdit *>("baiduAppId");
+        auto *secret = dialog.findChild<QLineEdit *>("translationSecret");
+        QVERIFY(backend && appId && secret);
+        const int index = backend->findData(int(TranslationBackend::BaiduGeneral));
+        backend->setCurrentIndex(index);
+        QVERIFY(QMetaObject::invokeMethod(backend, "activated", Qt::DirectConnection, Q_ARG(int, index)));
+        appId->setText("ui-app-id");
+        secret->setText("ui-secret");
+        QMessageBox *messageBox = nullptr;
+        QTimer dismiss;
+        connect(&dismiss, &QTimer::timeout, this, [&] {
+            for (auto *widget : QApplication::topLevelWidgets())
+                if (auto *box = qobject_cast<QMessageBox *>(widget)) {
+                    messageBox = box;
+                    box->accept();
+                }
+        });
+        dismiss.start(20);
+        QPushButton *test = nullptr;
+        for (auto *button : dialog.findChildren<QPushButton *>())
+            if (button->text() == "测试连接")
+                test = button;
+        QVERIFY(test);
+        test->click();
+        QTRY_COMPARE_WITH_TIMEOUT(receivedAppId, QByteArray("ui-app-id"), 5000);
+        QTRY_VERIFY_WITH_TIMEOUT(messageBox != nullptr, 5000);
+        QVERIFY2(signatureError.isEmpty(), qPrintable(signatureError));
     }
     void legacyScreenshotMigratesToInstantSelection() {
         QTemporaryDir tmp;

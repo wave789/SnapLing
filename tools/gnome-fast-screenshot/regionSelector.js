@@ -1,10 +1,11 @@
 import Clutter from 'gi://Clutter';
+import GLib from 'gi://GLib';
 import Meta from 'gi://Meta';
 import Shell from 'gi://Shell';
 import St from 'gi://St';
 
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
-import {freezeDesktop, snapshotActor, snapshotAt} from './desktopSnapshot.js';
+import {freezeMonitor, snapshotActor, snapshotAt} from './desktopSnapshot.js';
 
 const DRAG_DISTANCE = 4;
 const SHADE = 'background-color: rgba(0, 0, 0, 0.45);';
@@ -48,7 +49,7 @@ export class RegionSelector {
             return Promise.reject(new Error('The desktop is not available for SnapLing selection'));
 
         return new Promise((resolve, reject) => {
-            const operation = {resolve, reject, start: null, dragged: false};
+            const operation = {resolve, reject, start: null, dragged: false, cancelled: false};
             this._operation = operation;
             this._freeze(operation);
         });
@@ -83,18 +84,73 @@ export class RegionSelector {
             operation.monitors = Main.layoutManager.monitors.map(({x, y, width, height}) => ({x, y, width, height}));
             if (operation.monitors.length === 0)
                 throw new Error('No monitor is available for SnapLing selection');
+            operation.startedAt = GLib.get_monotonic_time();
+            operation.snapshots = [];
+            operation.hasSnapshot = false;
             // Qt hide() and the compositor's fade-out are asynchronous. Mask every actor
             // owned by the caller before painting the frozen desktop so neither a stale
             // surface nor a semi-transparent closing window becomes part of the snapshot.
             operation.hiddenActors = this._hideOwnerActors();
-            operation.snapshots = await freezeDesktop(operation.monitors);
-            if (this._operation !== operation)
-                return;
-
             this._show(operation);
+
+            // The transparent selector and input grab are visible before the first
+            // expensive compositor texture is read. Capture the pointer monitor first,
+            // then freeze the other outputs one by one so three screens do not serialize
+            // into one long blank interval.
+            await this._delay(16);
+            if (this._operation !== operation || operation.cancelled)
+                return;
+            const [pointerX, pointerY] = global.get_pointer();
+            const primary = monitorAt(operation.monitors, pointerX, pointerY) ?? operation.monitors[0];
+            const ordered = [primary, ...operation.monitors.filter(monitor => monitor !== primary)];
+            for (let index = 0; index < ordered.length; ++index) {
+                if (this._operation !== operation || operation.cancelled)
+                    return;
+                // After the first output is visible its shades are part of the stage.
+                // Temporarily remove the selector before freezing later outputs so the
+                // dark selection mask is not baked into their frozen textures.
+                const hideSelector = index > 0;
+                if (hideSelector)
+                    operation.overlay.hide();
+                let snapshots;
+                try {
+                    snapshots = await freezeMonitor(ordered[index]);
+                } finally {
+                    if (this._operation === operation && !operation.cancelled)
+                        operation.overlay.show();
+                }
+                if (this._operation !== operation || operation.cancelled)
+                    return;
+                for (const snapshot of snapshots) {
+                    operation.snapshots.push(snapshot);
+                    operation.snapshotLayer.add_child(snapshotActor(snapshot));
+                }
+                operation.hasSnapshot = true;
+                const [x, y] = global.get_pointer();
+                this._paint(operation, monitorAt(operation.monitors, x, y));
+                this._applyPendingSelection(operation);
+                if (index === 0) {
+                    const elapsedMs = (GLib.get_monotonic_time() - operation.startedAt) / 1000;
+                    console.log(`SnapLing frozen pointer monitor in ${elapsedMs.toFixed(1)} ms`);
+                }
+                if (this._operation !== operation ||
+                    operation.monitors.every(monitor => snapshotAt(operation.snapshots, monitor)))
+                    break;
+                if (index + 1 < ordered.length)
+                    await this._delay(0);
+            }
         } catch (error) {
             this._finish(operation, null, error);
         }
+    }
+
+    _delay(milliseconds) {
+        return new Promise(resolve => {
+            GLib.timeout_add(GLib.PRIORITY_DEFAULT, milliseconds, () => {
+                resolve();
+                return GLib.SOURCE_REMOVE;
+            });
+        });
     }
 
     _hideOwnerActors() {
@@ -136,16 +192,21 @@ export class RegionSelector {
         });
         overlay.set_size(global.stage.width, global.stage.height);
         operation.overlay = overlay;
-        for (const snapshot of operation.snapshots)
-            overlay.add_child(snapshotActor(snapshot));
+        operation.snapshotLayer = new Clutter.Actor({
+            width: global.stage.width,
+            height: global.stage.height,
+        });
+        overlay.add_child(operation.snapshotLayer);
 
-        operation.shades = Array.from({length: 4}, () => new St.Widget({style: SHADE}));
+        operation.dim = new St.Widget({style: SHADE});
+        operation.dim.set_size(global.stage.width, global.stage.height);
+        operation.selectionPatch = new Clutter.Actor({clip_to_allocation: true});
         operation.border = new St.Widget({style: 'border: 2px solid #0bd18b;'});
-        for (const actor of [...operation.shades, operation.border])
+        for (const actor of [operation.dim, operation.selectionPatch, operation.border]) {
+            actor.hide();
             overlay.add_child(actor);
+        }
 
-        const [x, y] = global.get_pointer();
-        this._paint(operation, monitorAt(operation.monitors, x, y));
         overlay.connect('captured-event', (_actor, event) => this._event(operation, event));
 
         // The screenshot is already in a compositor texture. Dismiss desktop popups
@@ -169,22 +230,26 @@ export class RegionSelector {
     _paint(operation, area) {
         if (sameArea(operation.paintedArea, area))
             return;
+        if (!operation.hasSnapshot)
+            return;
         operation.paintedArea = area;
-        const [top, bottom, left, right] = operation.shades;
         const {width, height} = operation.overlay;
+        operation.dim.show();
         if (!area) {
-            place(top, 0, 0, width, height);
-            for (const shade of [bottom, left, right])
-                shade.hide();
+            operation.selectionPatch.hide();
             operation.border.hide();
             return;
         }
-        place(top, 0, 0, width, area.y);
-        place(bottom, 0, area.y + area.height, width, height - area.y - area.height);
-        place(left, 0, area.y, area.x, area.height);
-        place(right, area.x + area.width, area.y, width - area.x - area.width, area.height);
-        for (const shade of [bottom, left, right])
-            shade.show();
+        const monitor = monitorAt(operation.monitors, area.x + 1, area.y + 1);
+        const snapshot = monitor ? snapshotAt(operation.snapshots, monitor) : null;
+        operation.selectionPatch.remove_all_children();
+        if (snapshot) {
+            place(operation.selectionPatch, area.x, area.y, area.width, area.height);
+            operation.selectionPatch.add_child(snapshotActor(snapshot, area.x, area.y));
+            operation.selectionPatch.show();
+        } else {
+            operation.selectionPatch.hide();
+        }
         place(operation.border, area.x, area.y, area.width, area.height);
         operation.border.show();
     }
@@ -237,7 +302,7 @@ export class RegionSelector {
             if (snapshot)
                 this._finish(operation, {snapshot, area, monitor: operation.monitor});
             else
-                this._finish(operation, null, new Error('No frozen image covers the selection'));
+                operation.pendingSelection = {area, monitor: operation.monitor};
             break;
         }
         }
@@ -252,10 +317,22 @@ export class RegionSelector {
         return operation.dragged ? dragArea(monitor, start, x, y) : monitor;
     }
 
+    _applyPendingSelection(operation) {
+        const pending = operation.pendingSelection;
+        if (!pending)
+            return;
+        const snapshot = snapshotAt(operation.snapshots, pending.monitor);
+        if (!snapshot)
+            return;
+        operation.pendingSelection = null;
+        this._finish(operation, {snapshot, area: pending.area, monitor: pending.monitor});
+    }
+
     _finish(operation, result, error = null) {
         if (this._operation !== operation)
             return;
         this._operation = null;
+        operation.cancelled = true;
         this._restoreOwnerActors(operation);
 
         if (operation.paintLater)

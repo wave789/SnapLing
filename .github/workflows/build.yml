@@ -6,7 +6,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Dependencies (Qt 6.4 baseline)
-        run: sudo apt-get update && sudo apt-get install -y ninja-build pkg-config python3-venv python3.12-venv libxkbcommon-dev qt6-base-dev qt6-wayland qt6-gtk-platformtheme qt6-svg-dev libpipewire-0.3-dev libx11-dev libxrandr-dev libxcb1-dev libzxing-dev xvfb xauth xdotool fonts-noto-cjk
+        run: sudo apt-get update && sudo apt-get install -y ninja-build pkg-config python3-venv python3.12-venv libxkbcommon-dev qt6-base-dev qt6-wayland qt6-gtk-platformtheme qt6-svg-dev libsecret-tools gnome-keyring libpipewire-0.3-dev libx11-dev libxrandr-dev libxcb1-dev libzxing-dev xvfb xauth xdotool fonts-noto-cjk
       - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
       - run: cmake --build build --parallel 4
       - name: Bundle PaddleOCR runtime

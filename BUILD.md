@@ -6,7 +6,7 @@
 
 ```bash
 sudo apt update
-sudo apt install build-essential cmake ninja-build file pkg-config python3-venv libxkbcommon-dev qt6-base-dev qt6-wayland qt6-gtk-platformtheme qt6-svg-dev \
+sudo apt install build-essential cmake ninja-build file pkg-config python3-venv libxkbcommon-dev qt6-base-dev qt6-wayland qt6-gtk-platformtheme qt6-svg-dev libsecret-tools gnome-keyring \
   libpipewire-0.3-dev libx11-dev libxrandr-dev libxcb1-dev \
   libzxing-dev xvfb xauth xdotool fonts-noto-cjk
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release

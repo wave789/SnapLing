@@ -261,9 +261,9 @@ class TestTranslationScreenshot : public QObject {
             QVERIFY(!unit.overflow);
             QVERIFY(unit.box.width() < 500);
             const auto fit = fitTranslation(unit.target, unit.box, image.size(), unit.fontSize);
-            QVERIFY(fit.font.pixelSize() >= qRound(unit.fontSize * .85));
-            QCOMPARE(fit.box, unit.box);
-            changedRegions += unit.box.toAlignedRect();
+            QCOMPARE(fit.font.pixelSize(), unit.fontSize);
+            QVERIFY(fit.box.contains(unit.box));
+            changedRegions += fit.box.toAlignedRect();
         }
         const auto rendered = session.document.render();
         for (int y = 0; y < image.height(); ++y)

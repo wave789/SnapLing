@@ -1,5 +1,6 @@
 #include "SettingsDialog.h"
 #include "ocr/OcrEngine.h"
+#include "platform/SecretStore.h"
 #ifndef Q_OS_WIN
 #include "ocr/RapidOcr.h"
 #include <QDBusConnection>
@@ -32,6 +33,12 @@
 #include <QTabWidget>
 #include <QVBoxLayout>
 namespace SnapLing {
+namespace {
+QString baiduTranslateEndpoint() {
+    return qEnvironmentVariable("SNAPLING_BAIDU_ENDPOINT",
+                                "https://fanyi-api.baidu.com/api/trans/vip/translate");
+}
+} // namespace
 #ifndef Q_OS_WIN
 namespace {
 void addGnomeScreenshotAcceleration(QFormLayout *form) {
@@ -228,36 +235,41 @@ SettingsDialog::SettingsDialog(Settings &s, ProviderConfig &runtime, QWidget *pa
     paddleStatus->setText("当前平台未提供 PaddleOCR 运行时。");
 #endif
     ocr->addRow(paddleStatus);
-    auto *ai = page("AI 翻译");
+    auto *ai = page("翻译服务");
     auto *preset = new QComboBox;
-    preset->addItems({"本地 Ollama", "OpenAI 兼容服务"});
+    preset->setObjectName("translationBackend");
+    preset->addItem("本地 Ollama", int(TranslationBackend::OpenAiCompatible));
+    preset->addItem("OpenAI 兼容服务", int(TranslationBackend::OpenAiCompatible));
+    preset->addItem("百度通用文本翻译", int(TranslationBackend::BaiduGeneral));
+    const auto initialPreset = runtime.backend == TranslationBackend::BaiduGeneral   ? 2
+                               : runtime.isLocal()                                  ? 0
+                                                                                    : 1;
+    preset->setCurrentIndex(initialPreset);
     ai->addRow("服务类型", preset);
     auto *name = new QLineEdit(runtime.name), *url = new QLineEdit(runtime.baseUrl),
          *model = new QLineEdit(runtime.model), *env = new QLineEdit(runtime.keyEnv),
-         *secret = new QLineEdit(runtime.sessionKey), *language = new QLineEdit(runtime.targetLanguage);
+         *appId = new QLineEdit(runtime.appId), *secret = new QLineEdit(runtime.sessionKey),
+         *language = new QLineEdit(runtime.targetLanguage);
+    name->setObjectName("translationProviderName");
+    env->setObjectName("translationKeyEnv");
+    secret->setObjectName("translationSecret");
+    appId->setObjectName("baiduAppId");
+    appId->setPlaceholderText("百度翻译控制台中的 AppID");
     secret->setEchoMode(QLineEdit::Password);
-    secret->setPlaceholderText("本次运行有效；持久密钥请使用环境变量");
+    secret->setPlaceholderText("保存时写入系统密钥环；也可使用 BAIDU_TRANSLATE_SECRET_KEY");
+    if (runtime.backend == TranslationBackend::BaiduGeneral && secret->text().isEmpty())
+        secret->setText(SecretStore::load(SecretStore::baiduTranslationCredential()));
     ai->addRow("名称", name);
     ai->addRow("Base URL", url);
     ai->addRow("模型", model);
+    ai->addRow("百度 AppID", appId);
     ai->addRow("密钥环境变量", env);
-    ai->addRow("临时 API Key", secret);
+    ai->addRow("密钥", secret);
     ai->addRow("目标语言", language);
     auto *disableThinking = new QCheckBox("关闭思考模式（加快翻译）");
     disableThinking->setChecked(runtime.disableThinking);
     disableThinking->setToolTip(
         "适用于 Ollama 和支持 reasoning_effort 的兼容服务。服务不支持此参数时，请取消勾选。");
-    connect(preset, qOverload<int>(&QComboBox::activated), this, [=](int index) {
-        name->setText(preset->currentText());
-        disableThinking->setChecked(index == 0);
-        if (index == 0) {
-            url->setText("http://127.0.0.1:11434/v1");
-            model->setText("qwen3.5:4b");
-        } else {
-            url->clear();
-            model->clear();
-        }
-    });
     auto *timeout = new QSpinBox;
     timeout->setRange(1, 600);
     timeout->setValue(runtime.timeoutSeconds);
@@ -275,12 +287,60 @@ SettingsDialog::SettingsDialog(Settings &s, ProviderConfig &runtime, QWidget *pa
     json->setChecked(runtime.structuredJson);
     ai->addRow(json);
     ai->addRow(disableThinking);
+    auto applyBackendVisibility = [=] {
+        const bool baidu =
+            TranslationBackend(preset->currentData().toInt()) == TranslationBackend::BaiduGeneral;
+        ai->setRowVisible(url, !baidu);
+        ai->setRowVisible(model, !baidu);
+        ai->setRowVisible(tokens, !baidu);
+        ai->setRowVisible(temp, !baidu);
+        ai->setRowVisible(json, !baidu);
+        ai->setRowVisible(disableThinking, !baidu);
+        ai->setRowVisible(appId, baidu);
+        ai->setRowVisible(env, !baidu);
+    };
+    connect(preset, qOverload<int>(&QComboBox::activated), this, [=](int index) {
+        const bool baidu =
+            TranslationBackend(preset->itemData(index).toInt()) == TranslationBackend::BaiduGeneral;
+        if (baidu) {
+            name->setText("百度通用文本翻译");
+            url->setText(baiduTranslateEndpoint());
+            model->clear();
+            if (env->text().trimmed().isEmpty() || env->text() == "SNAPLING_API_KEY")
+                env->setText("BAIDU_TRANSLATE_SECRET_KEY");
+            if (language->text().trimmed().isEmpty())
+                language->setText("简体中文");
+            if (secret->text().isEmpty())
+                secret->setText(SecretStore::load(SecretStore::baiduTranslationCredential()));
+        } else if (index == 0) {
+            name->setText("本地 Ollama");
+            url->setText("http://127.0.0.1:11434/v1");
+            model->setText("qwen3.5:4b");
+            env->setText("SNAPLING_API_KEY");
+            disableThinking->setChecked(true);
+        } else {
+            name->setText("OpenAI 兼容服务");
+            url->clear();
+            model->clear();
+            if (env->text() == "BAIDU_TRANSLATE_SECRET_KEY")
+                env->setText("SNAPLING_API_KEY");
+            disableThinking->setChecked(false);
+        }
+        applyBackendVisibility();
+    });
+    applyBackendVisibility();
     auto config = [=] {
         ProviderConfig p;
+        p.backend = TranslationBackend(preset->currentData().toInt());
         p.name = name->text().trimmed();
-        p.baseUrl = url->text().trimmed();
+        p.baseUrl = p.backend == TranslationBackend::BaiduGeneral
+                        ? baiduTranslateEndpoint()
+                        : url->text().trimmed();
         p.model = model->text().trimmed();
-        p.keyEnv = env->text().trimmed();
+        p.keyEnv = p.backend == TranslationBackend::BaiduGeneral
+                       ? QStringLiteral("BAIDU_TRANSLATE_SECRET_KEY")
+                       : env->text().trimmed();
+        p.appId = appId->text().trimmed();
         p.sessionKey = secret->text();
         p.targetLanguage = language->text().trimmed();
         p.timeoutSeconds = timeout->value();
@@ -293,6 +353,7 @@ SettingsDialog::SettingsDialog(Settings &s, ProviderConfig &runtime, QWidget *pa
     auto profiles =
         std::make_shared<QJsonArray>(QJsonDocument::fromJson(s.value("ai/profiles").toByteArray()).array());
     auto *profilesBox = new QComboBox;
+    profilesBox->setObjectName("translationProfiles");
     auto refreshProfiles = [=] {
         profilesBox->clear();
         for (auto v : *profiles)
@@ -304,19 +365,37 @@ SettingsDialog::SettingsDialog(Settings &s, ProviderConfig &runtime, QWidget *pa
         if (i < 0 || i >= profiles->size())
             return;
         auto o = profiles->at(i).toObject();
+        auto backend = translationBackendFromId(o["backend"].toString());
+        if (!o.contains("backend") &&
+            (o["name"].toString().contains("百度") || o["url"].toString().contains("baidu", Qt::CaseInsensitive)))
+            backend = TranslationBackend::BaiduGeneral;
+        int presetIndex = o.value("preset").toInt(-1);
+        if (presetIndex < 0)
+            presetIndex = backend == TranslationBackend::BaiduGeneral
+                              ? 2
+                              : (o["url"].toString().contains("127.0.0.1") ||
+                                         o["url"].toString().contains("localhost")
+                                     ? 0
+                                     : 1);
+        preset->setCurrentIndex(qBound(0, presetIndex, preset->count() - 1));
         name->setText(o["name"].toString());
         url->setText(o["url"].toString());
         model->setText(o["model"].toString());
+        appId->setText(o["appId"].toString());
         env->setText(o["keyEnv"].toString());
         language->setText(o["language"].toString());
         timeout->setValue(o["timeout"].toInt(90));
         tokens->setValue(o["tokens"].toInt(4096));
         temp->setValue(o["temperature"].toDouble(.1));
         json->setChecked(o["json"].toBool(true));
-        ProviderConfig profile;
-        profile.baseUrl = url->text();
-        disableThinking->setChecked(o["disableThinking"].toBool(profile.isLocal()));
+        disableThinking->setChecked(o["disableThinking"].toBool(
+            o["url"].toString().contains("127.0.0.1") || o["url"].toString().contains("localhost")));
+        applyBackendVisibility();
         secret->clear();
+        if (backend == TranslationBackend::BaiduGeneral) {
+            secret->setText(SecretStore::load(SecretStore::baiduTranslationCredential()));
+            secret->setPlaceholderText("已从系统密钥环读取；留空则不修改已保存密钥");
+        }
     });
     auto *profileButtons = new QWidget;
     auto *profileRow = new QHBoxLayout(profileButtons);
@@ -330,10 +409,15 @@ SettingsDialog::SettingsDialog(Settings &s, ProviderConfig &runtime, QWidget *pa
         auto p = config();
         if (p.name.isEmpty())
             return;
-        QJsonObject o{{"name", p.name},
+        if (p.backend == TranslationBackend::BaiduGeneral && !p.sessionKey.isEmpty())
+            SecretStore::store(SecretStore::baiduTranslationCredential(), p.sessionKey);
+        QJsonObject o{{"backend", translationBackendId(p.backend)},
+                      {"preset", preset->currentIndex()},
+                      {"name", p.name},
                       {"url", p.baseUrl},
                       {"model", p.model},
                       {"keyEnv", p.keyEnv},
+                      {"appId", p.appId},
                       {"language", p.targetLanguage},
                       {"timeout", p.timeoutSeconds},
                       {"tokens", p.maxTokens},
@@ -360,12 +444,49 @@ SettingsDialog::SettingsDialog(Settings &s, ProviderConfig &runtime, QWidget *pa
     });
     auto *test = new QPushButton("测试连接");
     ai->addRow(test);
-    auto *provider = new OpenAiTranslationProvider(this);
-    connect(test, &QPushButton::clicked, this, [provider, config] { provider->testConnection(config()); });
-    connect(provider, &OpenAiTranslationProvider::connectionResult, this,
+    auto *openAiProvider = new OpenAiTranslationProvider(this);
+    auto *baiduProvider = new BaiduTranslationProvider(this);
+    connect(test, &QPushButton::clicked, this, [this, openAiProvider, baiduProvider, config] {
+        const auto candidate = config();
+        if (candidate.backend == TranslationBackend::BaiduGeneral) {
+            if (candidate.appId.isEmpty()) {
+                QMessageBox::warning(this, "百度翻译",
+                                     "百度 AppID 为空，请确认已填写“百度 AppID”。");
+                return;
+            }
+            const auto environmentSecret =
+                qEnvironmentVariable(candidate.keyEnv.toUtf8().constData());
+            if (candidate.sessionKey.isEmpty() && environmentSecret.isEmpty()) {
+                QMessageBox::warning(this, "百度翻译",
+                                     "百度密钥为空，请填写“密钥”，或设置环境变量 "
+                                     "BAIDU_TRANSLATE_SECRET_KEY。");
+                return;
+            }
+            if (!candidate.sessionKey.isEmpty())
+                SecretStore::store(SecretStore::baiduTranslationCredential(), candidate.sessionKey);
+            TranslationUnit unit;
+            unit.id = "connection-test";
+            unit.source = "Hello";
+            unit.box = {0, 0, 100, 20};
+            unit.language = candidate.targetLanguage;
+            baiduProvider->translate({unit}, candidate);
+        } else {
+            openAiProvider->testConnection(candidate);
+        }
+    });
+    connect(openAiProvider, &OpenAiTranslationProvider::connectionResult, this,
             [this](bool, QString message) { QMessageBox::information(this, "连接测试", message); });
+    connect(baiduProvider, &ITranslationProvider::completed, this,
+            [this](auto units, qint64) {
+                QMessageBox::information(
+                    this, "连接测试",
+                    "百度翻译连接成功，测试译文：" + (units.isEmpty() ? QString() : units.first().target));
+            });
+    connect(baiduProvider, &ITranslationProvider::failed, this,
+            [this](QString message) { QMessageBox::warning(this, "连接测试", message); });
     auto *privacy =
-        new QLabel("本地地址与远程服务在发送前分别说明。截图文本不会写入日志；密钥不写入配置文件。");
+        new QLabel("供应商类型和百度 AppID 会保存；百度密钥写入系统密钥环，不写入普通配置文件。"
+                   "也可使用环境变量覆盖。截图文本仅在主动翻译时发送到所选服务。");
     privacy->setWordWrap(true);
     ai->addRow(privacy);
     auto *performance = page("性能");
@@ -409,6 +530,9 @@ SettingsDialog::SettingsDialog(Settings &s, ProviderConfig &runtime, QWidget *pa
                     s.set("hotkey/" + it.key(),
                           it.value()->keySequence().toString(QKeySequence::PortableText));
                 runtime = config();
+                if (runtime.backend == TranslationBackend::BaiduGeneral &&
+                    !runtime.sessionKey.isEmpty())
+                    SecretStore::store(SecretStore::baiduTranslationCredential(), runtime.sessionKey);
                 s.saveProvider(runtime);
                 s.set("general/theme", theme->currentIndex());
                 s.set("capture/waylandMethod", captureMethod->currentData());

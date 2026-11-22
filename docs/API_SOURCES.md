@@ -8,6 +8,7 @@
 - [PipeWire pw_stream_connect](https://docs.pipewire.org/group__pw__stream.html)：节点 ID 与 target.object 序列号的连接方式、STREAMING 状态。
 - [Tesseract C++ API](https://tesseract-ocr.github.io/tessdoc/APIExample.html)：仅用于显式启用的历史回归测试。
 - [RapidOCR 上游](https://github.com/RapidAI/RapidOCR)：内置 PaddleOCR worker 固定使用的 ONNX Runtime CPU 推理层。
+- [百度通用文本翻译 API](https://fanyi-api.baidu.com/doc/21)：请求参数、MD5 签名、语言代码、错误码和响应结构。
 - [Win32 GetDIBits](https://learn.microsoft.com/en-us/windows/win32/api/wingdi/nf-wingdi-getdibits)：读取前将 bitmap 从 DC 中解除选中。
 - [Qt QScreen](https://doc.qt.io/qt-6/qscreen.html)：逻辑几何与像素比例的区别。
 - [GNOME Portal 实现](https://gitlab.gnome.org/GNOME/xdg-desktop-portal-gnome)：交互式截图由 Shell 提供，不能绕过授权。

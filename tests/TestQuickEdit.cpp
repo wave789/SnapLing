@@ -352,6 +352,28 @@ class TestQuickEdit : public QObject {
         QTest::keyClick(canvas, Qt::Key_C, Qt::ControlModifier);
         QVERIFY(QApplication::clipboard()->text().contains("你好世界"));
     }
+    void translationFromAdjustmentToolbarActivatesCanvas() {
+        capture({20, 250, 760, 80}, true, false, false);
+        QVERIFY(overlay && overlay->isSelectionReady());
+        QVERIFY(overlay->canvasWidget());
+        QVERIFY(!overlay->canvasWidget()->isVisible());
+        delay = 0;
+        click("AI 翻译");
+        QTRY_COMPARE(overlay->phase(), SelectionOverlay::Phase::QuickEditing);
+        QVERIFY(overlay->canvasWidget()->isVisible());
+        waitForTranslation();
+        QVERIFY(overlay->session()->document.render() != overlay->session()->document.original());
+        QVERIFY(!overlay->session()->document.state().translations.isEmpty());
+        QCOMPARE(overlay->session()->document.state().translationMode, 1);
+    }
+    void singleConfirmClickOpensAdvancedEditor() {
+        capture({20, 250, 760, 80}, true, false, false);
+        QVERIFY(overlay && overlay->isSelectionReady());
+        QCOMPARE(overlay->phase(), SelectionOverlay::Phase::Selecting);
+        click("✅");
+        QTRY_COMPARE_WITH_TIMEOUT(windows<EditorWindow>().size(), 1, 3000);
+        QTRY_VERIFY_WITH_TIMEOUT(overlay.isNull(), 3000);
+    }
     void iconToolbarAndTranslationToggle() {
         capture({20, 250, 760, 80});
         QVERIFY(overlay);

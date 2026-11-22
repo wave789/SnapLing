@@ -1,6 +1,7 @@
 #include "ImageProcessor.h"
 #include <QFontMetricsF>
 #include <QTextLayout>
+#include <QtMath>
 #ifdef SNAPLING_HAVE_ZXING
 #include <ZXing/ReadBarcode.h>
 #include <ZXing/ReaderOptions.h>
@@ -54,13 +55,13 @@ TextFit fitTranslation(QString text, QRectF box, QSize size, int requested) {
     f.box = box.intersected(QRectF(QPointF(0, 0), size));
     f.font = QFont("Noto Sans CJK SC");
     const int maximum = requested > 0 ? qBound(8, requested, 96) : qBound(8, qRound(box.height()), 64);
-    const auto content = f.box.adjusted(1, 0, -1, 0);
     auto layoutText = f.text;
     layoutText.replace("\r\n", "\n");
     layoutText.replace('\n', QChar::LineSeparator);
     auto fits = [&](int px) {
         f.font.setPixelSize(px);
         f.lines.clear();
+        const auto content = f.box.adjusted(1, 0, -1, 0);
         if (content.isEmpty())
             return false;
         QFontMetricsF fm(f.font);
@@ -96,12 +97,85 @@ TextFit fitTranslation(QString text, QRectF box, QSize size, int requested) {
             line.baseline += content.topLeft() - ink.topLeft();
         return true;
     };
-    const int minimum = requested > 0 ? qMax(8, qRound(maximum * .85)) : 8;
-    for (int px = maximum; px >= minimum; --px)
-        if (fits(px))
+    if (fits(maximum))
+        return f;
+
+    // OCR line boxes can be only a few pixels taller than the glyph ink box.
+    // Keep the inferred font size and expand downward before considering overflow.
+    const auto original = f.box;
+    const int minimumHeight = qCeil(original.height()) + 1;
+    const int maximumHeight = qFloor(size.height() - original.top());
+    int low = minimumHeight, high = maximumHeight, fittedHeight = -1;
+    while (low <= high) {
+        const int middle = low + (high - low) / 2;
+        f.box = QRectF(original.topLeft(), QSizeF(original.width(), middle))
+                    .intersected(QRectF(QPointF(0, 0), size));
+        if (fits(maximum)) {
+            fittedHeight = middle;
+            high = middle - 1;
+        } else {
+            low = middle + 1;
+        }
+    }
+    if (fittedHeight >= 0) {
+        f.box = QRectF(original.topLeft(), QSizeF(original.width(), fittedHeight))
+                    .intersected(QRectF(QPointF(0, 0), size));
+        if (fits(maximum))
             return f;
+    }
+    // A translated line is often wider than the tight OCR rectangle. Preserve
+    // the inferred font size and search for the minimum width using the row's
+    // available horizontal space.
+    auto fitWidthAtOriginalHeight = [&](qreal x, qreal maximumWidth) {
+        if (maximumWidth <= original.width())
+            return QRectF{};
+        f.box = QRectF(x, original.top(), maximumWidth, original.height())
+                    .intersected(QRectF(QPointF(0, 0), size));
+        if (!fits(maximum))
+            return QRectF{};
+        int left = qCeil(original.width()) + 1;
+        int right = qFloor(maximumWidth);
+        int best = right;
+        while (left <= right) {
+            const int middle = left + (right - left) / 2;
+            f.box = QRectF(x, original.top(), middle, original.height())
+                        .intersected(QRectF(QPointF(0, 0), size));
+            if (fits(maximum)) {
+                best = middle;
+                right = middle - 1;
+            } else {
+                left = middle + 1;
+            }
+        }
+        return QRectF(x, original.top(), best, original.height())
+            .intersected(QRectF(QPointF(0, 0), size));
+    };
+    auto rightExpanded = fitWidthAtOriginalHeight(original.left(), size.width() - original.left());
+    if (!rightExpanded.isEmpty()) {
+        f.box = rightExpanded;
+        if (fits(maximum))
+            return f;
+    }
+    auto leftExpanded = fitWidthAtOriginalHeight(0, original.right());
+    if (!leftExpanded.isEmpty()) {
+        leftExpanded.moveRight(original.right());
+        f.box = leftExpanded;
+        if (fits(maximum))
+            return f;
+    }
+    auto fullRow = QRectF(0, original.top(), size.width(), original.height())
+                       .intersected(QRectF(QPointF(0, 0), size));
+    f.box = fullRow;
+    if (fits(maximum))
+        return f;
+    auto fullAvailable = QRectF(0, original.top(), size.width(), size.height() - original.top())
+                             .intersected(QRectF(QPointF(0, 0), size));
+    f.box = fullAvailable;
+    if (fits(maximum))
+        return f;
     // 自动排版始终限制在当前文字框；放不下时保留原文，交由用户明确调整区域。
     f.lines.clear();
+    f.box = original;
     f.overflow = true;
     return f;
 }

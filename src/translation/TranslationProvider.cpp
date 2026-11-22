@@ -1,9 +1,12 @@
 #include "TranslationProvider.h"
+#include <QCryptographicHash>
+#include <QDateTime>
 #include <QElapsedTimer>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QRegularExpression>
 #include <QSet>
+#include <QUrlQuery>
 namespace SnapLing {
 OpenAiTranslationProvider::OpenAiTranslationProvider(QObject *p) : ITranslationProvider(p) {
     timeout.setSingleShot(true);
@@ -213,6 +216,238 @@ void OpenAiTranslationProvider::testConnection(ProviderConfig cfg) {
                                      : "无法连接模型列表接口，请检查地址和认证");
         r->deleteLater();
     });
+}
+BaiduTranslationProvider::BaiduTranslationProvider(QObject *p) : ITranslationProvider(p) {
+    timeout.setSingleShot(true);
+    connect(&timeout, &QTimer::timeout, this, [this] {
+        if (reply) {
+            reply->setProperty("timedOut", true);
+            reply->abort();
+        } else {
+            fail("百度翻译请求超时");
+        }
+    });
+}
+QString BaiduTranslationProvider::languageCode(QString language) {
+    language = language.trimmed().toLower();
+    if (language == "zh" || language == "zh-cn" || language == "zh_cn" ||
+        language.contains("简体") || language.contains("中文") || language.contains("汉语"))
+        return "zh";
+    if (language == "zh-tw" || language == "zh_tw" || language.contains("繁体"))
+        return "cht";
+    if (language == "en" || language == "english" || language.contains("英语") ||
+        language.contains("英文"))
+        return "en";
+    if (language == "ja" || language == "jp" || language.contains("日语") || language.contains("日文"))
+        return "jp";
+    if (language == "ko" || language == "kr" || language.contains("韩语") || language.contains("韩文"))
+        return "kor";
+    if (language == "fr" || language == "fra" || language.contains("法语"))
+        return "fra";
+    if (language == "de" || language == "ger" || language.contains("德语"))
+        return "de";
+    if (language == "es" || language == "spa" || language.contains("西班牙语"))
+        return "spa";
+    if (language == "ru" || language.contains("俄语"))
+        return "ru";
+    if (language == "pt" || language.contains("葡萄牙语"))
+        return "pt";
+    if (language == "it" || language.contains("意大利语"))
+        return "it";
+    if (language == "ar" || language.contains("阿拉伯语"))
+        return "ara";
+    if (language == "th" || language.contains("泰语"))
+        return "th";
+    if (language == "vi" || language.contains("越南语"))
+        return "vie";
+    return language.size() <= 8 ? language : QString();
+}
+bool BaiduTranslationProvider::parseResponse(const QByteArray &data, QVector<TranslationUnit> &units,
+                                              QString &error) {
+    QJsonParseError parse;
+    const auto document = QJsonDocument::fromJson(data, &parse);
+    if (parse.error != QJsonParseError::NoError || !document.isObject()) {
+        error = "百度翻译返回了无法解析的 JSON";
+        return false;
+    }
+    const auto object = document.object();
+    const auto errorCode = object.value("error_code").toVariant().toString();
+    if (!errorCode.isEmpty() && errorCode != "0" && errorCode != "52000") {
+        QString reason;
+        if (errorCode == "52003")
+            reason = "AppID 无效或未授权";
+        else if (errorCode == "54001")
+            reason = "签名错误，请检查密钥";
+        else if (errorCode == "54003")
+            reason = "请求过于频繁";
+        else if (errorCode == "54004")
+            reason = "账户余额不足";
+        else if (errorCode == "58001")
+            reason = "目标语言不受支持";
+        else if (errorCode == "58002")
+            reason = "翻译服务已关闭";
+        else if (errorCode == "90107")
+            reason = "认证未通过";
+        else
+            reason = object.value("error_msg").toString();
+        error = QString("百度翻译错误 %1：%2").arg(errorCode, reason.isEmpty() ? "未知错误" : reason);
+        return false;
+    }
+    const auto results = object.value("trans_result").toArray();
+    if (results.size() != units.size()) {
+        error = QString("百度翻译返回了 %1 个结果，预期 %2 个").arg(results.size()).arg(units.size());
+        return false;
+    }
+    for (int i = 0; i < units.size(); ++i) {
+        const auto result = results[i].toObject();
+        const auto target = result.value("dst").toString().trimmed();
+        if (target.isEmpty()) {
+            error = "百度翻译返回了空译文";
+            return false;
+        }
+        units[i].target = target;
+        units[i].status = "done";
+    }
+    return true;
+}
+void BaiduTranslationProvider::translate(QVector<TranslationUnit> units, ProviderConfig cfg) {
+    if (reply || !allUnits.isEmpty()) {
+        emit failed("已有百度翻译请求，请先取消");
+        return;
+    }
+    if (units.isEmpty()) {
+        emit failed("没有待翻译的 OCR 文字");
+        return;
+    }
+    const auto target = languageCode(cfg.targetLanguage);
+    if (target.isEmpty()) {
+        emit failed("当前目标语言无法映射为百度翻译语言代码");
+        return;
+    }
+    const auto environmentSecret = qEnvironmentVariable(cfg.keyEnv.toUtf8().constData());
+    const auto secret = environmentSecret.isEmpty() ? cfg.sessionKey : environmentSecret;
+    if (cfg.appId.trimmed().isEmpty() || secret.isEmpty()) {
+        emit failed("请填写百度翻译 AppID 和密钥，或设置密钥环境变量");
+        return;
+    }
+    const auto url = QUrl(cfg.baseUrl.isEmpty()
+                              ? QStringLiteral("https://fanyi-api.baidu.com/api/trans/vip/translate")
+                              : cfg.baseUrl);
+    if (!url.isValid() || (url.scheme() != "http" && url.scheme() != "https") || !url.userInfo().isEmpty()) {
+        emit failed("百度翻译接口地址无效");
+        return;
+    }
+    cancelled = requestFailed = false;
+    allUnits = std::move(units);
+    translated.clear();
+    translated.reserve(allUnits.size());
+    activeConfig = std::move(cfg);
+    offset = 0;
+    elapsed.start();
+    timeout.start(qBound(1, activeConfig.timeoutSeconds, 600) * 1000);
+    sendNext();
+}
+void BaiduTranslationProvider::sendNext() {
+    if (cancelled || requestFailed)
+        return;
+    if (offset >= allUnits.size()) {
+        timeout.stop();
+        emit completed(translated, elapsed.elapsed());
+        allUnits.clear();
+        translated.clear();
+        return;
+    }
+    const QString appId = activeConfig.appId.trimmed();
+    const auto environmentSecret = qEnvironmentVariable(activeConfig.keyEnv.toUtf8().constData());
+    const QString secret = environmentSecret.isEmpty() ? activeConfig.sessionKey : environmentSecret;
+    QVector<TranslationUnit> batch;
+    QStringList raw;
+    int bytes = 0;
+    for (; offset < allUnits.size(); ++offset) {
+        auto source = allUnits[offset].source;
+        source.replace('\r', ' ').replace('\n', ' ');
+        const int encoded = QUrl::toPercentEncoding(source).size();
+        if (!batch.isEmpty() && bytes + encoded + 3 > 5000)
+            break;
+        batch << allUnits[offset];
+        raw << source;
+        bytes += encoded + 3;
+    }
+    const QString queryText = raw.join('\n');
+    const QString salt = QString::number(QDateTime::currentMSecsSinceEpoch());
+    const auto sign = QString::fromLatin1(
+        QCryptographicHash::hash((appId + queryText + salt + secret).toUtf8(),
+                                 QCryptographicHash::Md5)
+            .toHex());
+    QUrlQuery form;
+    form.addQueryItem("q", queryText);
+    form.addQueryItem("from", "auto");
+    form.addQueryItem("to", languageCode(activeConfig.targetLanguage));
+    form.addQueryItem("appid", appId);
+    form.addQueryItem("salt", salt);
+    form.addQueryItem("sign", sign);
+    QNetworkRequest request(QUrl(activeConfig.baseUrl.isEmpty()
+                                     ? QStringLiteral("https://fanyi-api.baidu.com/api/trans/vip/translate")
+                                     : activeConfig.baseUrl));
+    request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::ManualRedirectPolicy);
+    request.setHeader(QNetworkRequest::ContentTypeHeader,
+                      "application/x-www-form-urlencoded; charset=utf-8");
+    reply = network.post(request, form.toString(QUrl::FullyEncoded).toUtf8());
+    auto *current = reply.data();
+    connect(current, &QNetworkReply::readyRead, this, [current] {
+        if (current->bytesAvailable() > 8 * 1024 * 1024)
+            current->abort();
+    });
+    connect(current, &QNetworkReply::finished, this, [this, current, batch]() mutable {
+        if (reply == current)
+            reply = nullptr;
+        current->deleteLater();
+        if (requestFailed)
+            return;
+        if (cancelled) {
+            emit failed("翻译已取消");
+            return;
+        }
+        if (current->property("timedOut").toBool()) {
+            fail("百度翻译请求超时");
+            return;
+        }
+        const int status = current->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        if (current->error() != QNetworkReply::NoError || status < 200 || status >= 300) {
+            fail(QString("百度翻译请求失败（HTTP %1，网络错误 %2）")
+                     .arg(status)
+                     .arg(int(current->error())));
+            return;
+        }
+        QString error;
+        if (!parseResponse(current->readAll(), batch, error)) {
+            fail(error);
+            return;
+        }
+        for (const auto &unit : batch)
+            translated << unit;
+        sendNext();
+    });
+}
+void BaiduTranslationProvider::cancel() {
+    cancelled = true;
+    timeout.stop();
+    if (reply)
+        reply->abort();
+    else if (!requestFailed && (!allUnits.isEmpty() || !translated.isEmpty())) {
+        allUnits.clear();
+        translated.clear();
+        emit failed("翻译已取消");
+    }
+}
+void BaiduTranslationProvider::fail(QString error) {
+    if (requestFailed)
+        return;
+    requestFailed = true;
+    timeout.stop();
+    allUnits.clear();
+    translated.clear();
+    emit failed(std::move(error));
 }
 static bool isFilePath(const QString &text) {
     static const QRegularExpression path(

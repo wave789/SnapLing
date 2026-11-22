@@ -2,7 +2,7 @@
 
 C++20 / Qt6 Widgets 截图工具。提供真实桌面捕获、非破坏性标注、图片上的离线 OCR 文字选择，以及兼容 Ollama 和 OpenAI Chat Completions 的原地翻译。
 
-当前版本为 **0.3.4**。本仓库包含可执行实现、内置 PaddleOCR 模型与运行时、自动化测试和打包工具。Windows 与 Wayland 屏幕访问仍需要交互式实机验收，具体执行记录见 [TESTING.md](TESTING.md)，缺项见 [LIMITATIONS.md](LIMITATIONS.md)。
+当前版本为 **0.5.4**。本仓库包含可执行实现、内置 PaddleOCR 模型与运行时、自动化测试和打包工具。Windows 与 Wayland 屏幕访问仍需要交互式实机验收，具体执行记录见 [TESTING.md](TESTING.md)，缺项见 [LIMITATIONS.md](LIMITATIONS.md)。
 
 ## 已实现
 
@@ -12,7 +12,7 @@ C++20 / Qt6 Widgets 截图工具。提供真实桌面捕获、非破坏性标注
 - 矩形、椭圆、直线、箭头、画笔、荧光笔、文字、序号、马赛克、裁剪、旋转、翻转；标注颜色、线宽、字体、透明度、移动、修改和删除；撤销/重做。
 - `.snapling` 版本化工程保存原图、编辑指令、OCR 和翻译布局；PNG 透明导出、JPG 背景色；异步保存图片。
 - 本地 OCR 固定使用 PaddleOCR PP-OCRv6 Small，检测、识别、方向模型和推理运行环境随安装包提供。识别后可在原图上拖选文字，Ctrl+A 全选，Ctrl+C 复制文字或图片，并可导出 TXT/Markdown。
-- Ollama / OpenAI 兼容 HTTP API：供应商配置、环境变量密钥、连接测试、异步翻译、取消、超时、ID 校验、原地译文渲染和图片导出。
+- Ollama / OpenAI 兼容 / 百度通用文本翻译：供应商配置、连接测试、异步翻译、取消、超时、ID 校验、原地译文渲染和图片导出。
 - 简单背景估色覆盖、复杂背景底板、字号自适应；容纳不了的文字阻止图片导出，工程仍保留完整内容。
 - 贴图、HEX 取色、ZXing 二维码识别、需确认的敏感信息打码建议、可关闭历史、主题与用户登录自动启动。
 - Ubuntu GNOME Wayland 默认在合成器内冻结桌面并立即显示选区，扩展不可用时自动回退到系统单次截图。设置中保留系统单次截图和 ScreenCast 兼容模式，取图后关闭临时共享。
@@ -22,7 +22,7 @@ C++20 / Qt6 Widgets 截图工具。提供真实桌面捕获、非破坏性标注
 Ubuntu 24.04 / 26.04：
 
 ```bash
-sudo apt install build-essential cmake ninja-build pkg-config python3-venv libxkbcommon-dev qt6-base-dev qt6-wayland qt6-gtk-platformtheme qt6-svg-dev \
+sudo apt install build-essential cmake ninja-build pkg-config python3-venv libxkbcommon-dev qt6-base-dev qt6-wayland qt6-gtk-platformtheme qt6-svg-dev libsecret-tools gnome-keyring \
   libpipewire-0.3-dev libx11-dev libxrandr-dev libxcb1-dev \
   libzxing-dev xvfb xauth xdotool fonts-noto-cjk
 ./tools/build.sh
@@ -60,7 +60,7 @@ snapling --cancel-capture # 取消尚未完成的截图
 5. 点击 OCR 后直接拖选图中文字。Ctrl+A 全选文字，Ctrl+C 复制所选原文；译文显示时复制对应译文，没有文字选区时复制图片。点击翻译图标后按钮变绿，译文叠加到当前文字位置；再次点击取消未完成任务并恢复原图，标注和已有译文图层保留。
 6. 按 Enter 或点击 ✅ 打开独立高级编辑器，同一份文档保留全部标注、OCR、翻译、撤销与重做历史，可继续裁剪、旋转、翻转、精调译文、保存工程或贴图。复制和保存会保留即时编辑界面，❌ 或 Esc 取消截图。
 
-Ubuntu GNOME Wayland 默认使用随 `.deb` 安装的合成器扩展。按快捷键后 GNOME Shell 先冻结桌面并立刻显示多屏选区；单击任一屏幕选择整屏，拖动选择局部。松手后把目标显示器的完整冻结图交给 SnapLing，用户可继续移动或缩放初始选区，因此不需要等待整个桌面重新截图。扩展缺失、被停用或版本不匹配时，会自动回退到非交互式 Screenshot Portal，不建议依赖该回退路径的响应速度。
+Ubuntu GNOME Wayland 默认使用随 `.deb` 安装的合成器扩展。按快捷键后先立即显示透明交互层和十字光标，并优先冻结鼠标所在屏幕；其他屏幕随后逐块冻结，不再等待三屏全景一次合成。单击任一屏幕选择整屏，拖动选择局部。松手后把目标显示器的完整冻结图交给 SnapLing，用户可继续移动或缩放初始选区。扩展缺失、被停用或版本不匹配时，会自动回退到非交互式 Screenshot Portal，不建议依赖该回退路径的响应速度。
 
 安装新版 `.deb` 后，SnapLing 会尝试自动启用随包的 GNOME 49/50 扩展。选择「整个桌面」和矩形模式即可使用即时框选。首次安装或升级扩展后仍需注销并重新登录一次，GNOME 才会加载新扩展代码。[启用步骤和模式范围](docs/GNOME_FLASH.md)
 
@@ -106,17 +106,19 @@ OCR 固定使用 PaddleOCR PP-OCRv6 Small，不再提供其他引擎选择。正
 
 截图 OCR 使用分散文本模式，预处理深色画面和小字号，并将识别坐标还原到原图像素。相距较远的文字分成独立文字框，避免把弹窗菜单与背景内容拼成一行。
 
-## AI 翻译配置
+## 翻译服务配置
 
 默认本机 Ollama：Base URL `http://127.0.0.1:11434/v1`，模型 `qwen3.5:4b`。模型须由用户在 Ollama 中预先安装；SnapLing 不启动、下载或常驻加载大模型。
 
-设置 → AI 翻译：配置地址、模型、目标语言、超时、temperature、token 上限，可添加/更新/删除供应商。支持兼容 `/chat/completions` 的服务，连接测试使用 `/models`。不支持 JSON 模式的服务可关闭 `response_format`，但仍需返回可解析的块 ID JSON。
+设置 → 翻译服务：可在“本地 Ollama”“OpenAI 兼容服务”“百度通用文本翻译”之间选择，并添加、更新、删除“已保存供应商”。Ollama/OpenAI 兼容服务仍支持地址、模型、目标语言、超时、temperature 和 token 上限；连接测试使用 `/models`。不支持 JSON 模式的服务可关闭 `response_format`，但仍需返回可解析的块 ID JSON。
+
+百度通用文本翻译需要填写百度翻译控制台的 AppID 和密钥。AppID 与供应商类型会随配置和已保存供应商保存；密钥通过 `libsecret-tools` 写入 GNOME Keyring，不写入普通配置文件，重新启动或重新选择百度供应商时自动取回。也可设置 `BAIDU_TRANSLATE_SECRET_KEY` 环境变量覆盖已保存密钥。SnapLing 按百度接口规范生成 MD5 签名，源语言使用自动检测，并按 OCR 行分批请求后映射回原文字框。
 
 本机服务默认开启「关闭思考模式」，通过 `reasoning_effort: none` 避免 Qwen 等模型在生成译文前耗尽输出 token。兼容服务不支持此参数时可取消勾选。生成被截断、仅返回思考过程或返回空内容时，应用会显示对应原因。
 
-密钥使用环境变量 `SNAPLING_API_KEY`（可改变量名），或本次运行有效的临时密钥。密钥不写入配置和日志。远程服务发送前明确显示目标地址并确认；本机服务也明确显示地址。只有主动翻译会发送 OCR 文字，不发送截图图片，不提供工具执行能力。
+OpenAI 兼容服务默认使用环境变量 `SNAPLING_API_KEY`；百度默认使用系统密钥环，也接受 `BAIDU_TRANSLATE_SECRET_KEY`。两者都可在设置中临时填写密钥。密钥不写入普通配置和日志。选中百度供应商并点击翻译即视为确认发送；OpenAI 兼容远程服务仍在发送前显示地址并确认。本机服务明确显示地址。只有主动翻译会发送 OCR 文字，不发送截图图片，不提供工具执行能力。
 
-自动翻译保留路径、项目列表中路径上方的名称、技术日志键值、目标语言文字和低置信度内容；需要单独处理时可先在 OCR 模式选择文字。译文沿原文字框排列，按原文字高度估计字号，最多自动缩小约 15%。放不下时保留原文并阻止不完整导出，不会自动扩宽覆盖相邻内容。原字号估计和语言判断存在限制，详见 [LIMITATIONS.md](LIMITATIONS.md)。
+自动翻译保留路径、项目列表中路径上方的名称、技术日志键值、目标语言文字和低置信度内容；需要单独处理时可先在 OCR 模式选择文字。译文字号严格采用 OCR 行框高度估算值，不再自动缩小；空间不足时优先向下扩高，再在图像范围内扩宽。只有保持原字号仍无法放入可用图像区域时才保留原文。原字号估计和语言判断存在限制，详见 [LIMITATIONS.md](LIMITATIONS.md)。
 
 高级编辑器的撤销、重做和旋转使用图标；文字通过 Ctrl+A 全选、Ctrl+C 复制。原文与译文由翻译按钮切换，不再显示原文/译文/对照下拉框或译文微调入口。保存 PNG/JPG 与复制图片包含当前启用的译文，关闭翻译后输出原图及标注。「保存工程」保留可再次修改的数据。
 

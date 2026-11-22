@@ -32,7 +32,7 @@ int main(int argc, char **argv) {
     Q_INIT_RESOURCE(resources);
     app.setApplicationName("SnapLing");
     app.setOrganizationName("SnapLing");
-    app.setApplicationVersion("0.3.4");
+    app.setApplicationVersion("0.5.4");
     app.setQuitOnLastWindowClosed(false);
     app.setWindowIcon(QIcon(":/snapling.svg"));
     QCommandLineParser parser;

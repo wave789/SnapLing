@@ -1,6 +1,7 @@
 #include "EditorSession.h"
 #include "history/HistoryStore.h"
 #include "image/ImageProcessor.h"
+#include "platform/SecretStore.h"
 #include <QApplication>
 #include <QClipboard>
 #include <QDateTime>
@@ -51,7 +52,11 @@ void EditorSession::initialize() {
     connectOcr(paddleOcr, "paddleocr");
 #endif
     connectOcr(tesseract, "tesseract");
-    connect(&provider, &ITranslationProvider::completed, this, [this](auto units, qint64 ms) {
+    connectTranslationProvider(provider);
+    connectTranslationProvider(baiduProvider);
+}
+void EditorSession::connectTranslationProvider(ITranslationProvider &engine) {
+    connect(&engine, &ITranslationProvider::completed, this, [this](auto units, qint64 ms) {
         setTask(Task::Idle);
         if (!translationEnabled)
             return;
@@ -69,11 +74,12 @@ void EditorSession::initialize() {
         });
         notify(QString("翻译完成，%1 ms。保留 %2 个原文区域（路径、同语言或识别存疑）。%3")
                    .arg(ms).arg(preservedLines)
-                   .arg(overflow ? QString("%1 个译文区域放不下，保留原文；可在高级编辑器调整。").arg(overflow)
-                                 : "可继续标注或进入高级编辑器。"));
+                   .arg(overflow ? QString("%1 个译文在保持 OCR 字号后仍无法放入可用图像区域，已保留原文。")
+                                       .arg(overflow)
+                                 : "译文保持 OCR 估算字号，可继续标注或进入高级编辑器。"));
         qInfo("translation_ms=%lld", ms);
     });
-    connect(&provider, &ITranslationProvider::failed, this, [this](QString error) {
+    connect(&engine, &ITranslationProvider::failed, this, [this](QString error) {
         setTask(Task::Idle);
         const bool enabled = translationEnabled;
         setTranslationEnabled(false);
@@ -181,6 +187,11 @@ void EditorSession::startTranslation() {
         notify("没有可翻译的文字，请调整选区后重新 OCR。", true);
         return;
     }
+    if (config.backend == TranslationBackend::BaiduGeneral && config.sessionKey.isEmpty() &&
+        qEnvironmentVariable(config.keyEnv.toUtf8().constData()).isEmpty()) {
+        config.sessionKey = SecretStore::load(SecretStore::baiduTranslationCredential());
+        qInfo("baidu_keyring_loaded=%d", !config.sessionKey.isEmpty());
+    }
     requestConfig = config;
     requestUnits = translationUnits(translationLines, requestConfig.targetLanguage, !translateSelected);
     preservedLines = translationLines.size() - requestUnits.size();
@@ -190,16 +201,23 @@ void EditorSession::startTranslation() {
         return;
     }
     const auto endpoint = translationEndpoint();
-    if (!requestConfig.isLocal()) {
+    if (!requestConfig.isLocal() &&
+        requestConfig.backend != TranslationBackend::BaiduGeneral) {
         approvalPending = true;
         notify("等待允许将 OCR 文字发送到：" + endpoint);
         emit taskChanged();
         emit translationApprovalRequested(endpoint);
         return;
     }
+    auto *translationProvider =
+        requestConfig.backend == TranslationBackend::BaiduGeneral
+            ? static_cast<ITranslationProvider *>(&baiduProvider)
+            : static_cast<ITranslationProvider *>(&provider);
     setTask(Task::Translating);
-    notify("本机翻译：" + endpoint + " · 可继续编辑");
-    provider.translate(requestUnits, requestConfig);
+    notify(requestConfig.backend == TranslationBackend::BaiduGeneral
+               ? "正在请求百度翻译：可继续编辑"
+               : "本机翻译：" + endpoint + " · 可继续编辑");
+    translationProvider->translate(requestUnits, requestConfig);
 }
 QString EditorSession::translationEndpoint() const {
     return QUrl(requestConfig.baseUrl)
@@ -219,7 +237,11 @@ void EditorSession::approveTranslation(bool allowed) {
         return;
     setTask(Task::Translating);
     notify("正在请求翻译服务… 可继续编辑");
-    provider.translate(requestUnits, requestConfig);
+    auto *translationProvider =
+        requestConfig.backend == TranslationBackend::BaiduGeneral
+            ? static_cast<ITranslationProvider *>(&baiduProvider)
+            : static_cast<ITranslationProvider *>(&provider);
+    translationProvider->translate(requestUnits, requestConfig);
 }
 void EditorSession::cancel() {
     if (currentTask != Task::Idle || approvalPending)
@@ -232,6 +254,7 @@ void EditorSession::cancel() {
 #endif
     tesseract.cancel();
     provider.cancel();
+    baiduProvider.cancel();
 }
 void EditorSession::copyImage() {
     QApplication::clipboard()->setImage(document.render());

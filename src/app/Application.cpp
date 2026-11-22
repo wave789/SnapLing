@@ -344,9 +344,11 @@ void Application::configureGnomeCaptureAcceleration() {
                 auto *protocolWatcher = new QDBusPendingCallWatcher(
                     QDBusConnection::sessionBus().asyncCall(protocolCall, 1500), this);
                 connect(protocolWatcher, &QDBusPendingCallWatcher::finished, this,
-                        [this, protocolWatcher] {
+                        [this, wayland, protocolWatcher] {
                             const QDBusPendingReply<uint> protocol = *protocolWatcher;
                             protocolWatcher->deleteLater();
+                            if (!protocol.isError())
+                                wayland->setCompositorProtocol(int(protocol.value()));
                             const bool compositorMethod =
                                 settings.value("capture/waylandMethod", "compositor").toString() == "compositor";
                             const bool hidesOwnWindows =

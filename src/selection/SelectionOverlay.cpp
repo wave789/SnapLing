@@ -719,8 +719,9 @@ void SelectionOverlay::createToolbar() {
     auto *confirmAction = add("✅", ToolIcon::Confirm, [this] {
         if (currentPhase == Phase::Selecting)
             beginQuickEditing();
-        else
-            confirm();
+        // The confirmation button means "open advanced editing". Do not require
+        // a second click when the selection stage has just created the quick canvas.
+        confirm();
     });
     confirmAction->setObjectName("quickConfirmAction");
     confirmAction->setToolTip("进入即时编辑（Enter）");
@@ -835,8 +836,11 @@ void SelectionOverlay::runOcr(bool thenTranslate) {
     editing->runOcr(thenTranslate);
 }
 void SelectionOverlay::translate() {
-    if (canvas)
+    if (canvas) {
+        if (currentPhase == Phase::Selecting)
+            showQuickCanvas();
         editing->toggleTranslation(canvas->selectedLines());
+    }
 }
 void SelectionOverlay::copy() {
     const auto selected = canvas->selectedLines();

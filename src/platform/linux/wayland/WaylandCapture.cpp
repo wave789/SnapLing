@@ -15,6 +15,7 @@
 #include <QFileInfo>
 #include <QFutureWatcher>
 #include <QGuiApplication>
+#include <QBuffer>
 #include <QImageReader>
 #include <QScreen>
 #include <QSettings>
@@ -22,6 +23,7 @@
 #include <QUrl>
 #include <QUuid>
 #include <QtConcurrent>
+#include <QtEndian>
 #include <sys/stat.h>
 #include <unistd.h>
 namespace SnapLing {
@@ -40,6 +42,60 @@ static bool isGnomeDesktop() {
 }
 static QDBusMessage compositorCall(const QString &method) {
     return QDBusMessage::createMethodCall("org.gnome.Shell", "/io/snapling/Screenshot", compositorInterface, method);
+}
+QImage WaylandCapture::decodeCaptureImage(QIODevice &device, QString &error) {
+    auto data = device.readAll();
+    static const QByteArray magic("SNRAW1");
+    if (data.startsWith(magic)) {
+        if (data.size() < 32) {
+            error = "原始纹理交接头不完整";
+            return {};
+        }
+        const auto *bytes = reinterpret_cast<const uchar *>(data.constData());
+        const auto version = qFromLittleEndian<quint16>(bytes + 6);
+        const int width = qFromLittleEndian<qint32>(bytes + 8);
+        const int height = qFromLittleEndian<qint32>(bytes + 12);
+        const int stride = qFromLittleEndian<qint32>(bytes + 16);
+        const auto format = qFromLittleEndian<quint32>(bytes + 20);
+        const quint64 payloadSize = qFromLittleEndian<quint64>(bytes + 24);
+        if (version != 1 || width <= 0 || height <= 0 || stride < width * 4 ||
+            (format != 1 && format != 2) || payloadSize > quint64(data.size() - 32) ||
+            payloadSize != quint64(stride) * quint64(height)) {
+            error = QString("原始纹理交接参数无效：%1x%2 stride=%3 payload=%4")
+                        .arg(width)
+                        .arg(height)
+                        .arg(stride)
+                        .arg(payloadSize);
+            return {};
+        }
+        // The compositor handoff is a screenshot, so its output is opaque. BGRX
+        // avoids transparent-alpha loss; legacy premultiplied BGRA is interpreted
+        // with the same opaque Qt layout for compatibility.
+        QImage image(reinterpret_cast<uchar *>(data.data() + 32), width, height, stride,
+                     QImage::Format_RGB32);
+        if (image.isNull()) {
+            error = "无法从原始 BGRA 纹理创建图像";
+            return {};
+        }
+        return image.copy();
+    }
+    QBuffer buffer;
+    buffer.setData(data);
+    if (!buffer.open(QIODevice::ReadOnly)) {
+        error = "无法打开截图图像数据";
+        return {};
+    }
+    QImageReader reader(&buffer);
+    const auto size = reader.size();
+    if (size.isEmpty() || qint64(size.width()) * size.height() > 100000000) {
+        error = "截图图像尺寸无效或超过 1 亿像素限制";
+        return {};
+    }
+    auto image = reader.read();
+    image.setDevicePixelRatio(1);
+    if (image.isNull())
+        error = reader.errorString();
+    return image;
 }
 static bool sameLayout(const QVector<CaptureScreen> &a, const QVector<CaptureScreen> &b) {
     if (a.size() != b.size())
@@ -103,6 +159,7 @@ void WaylandCapture::setMethod(Method value) {
         return;
     resetSharing();
     method = value;
+    compositorProtocol = -1;
 }
 void WaylandCapture::cancel() {
     if (temporarySharing || starting || request || resettingPermission || compositorPending)
@@ -313,6 +370,15 @@ void WaylandCapture::requestScreenshot(ScreenshotPurpose purpose) {
 }
 void WaylandCapture::selectInCompositor() {
     const auto job = generation;
+    if (compositorProtocol >= 3) {
+        openCompositorSelector();
+        return;
+    }
+    if (compositorProtocol == 0) {
+        qInfo("capture_fast_fallback=portal reason=cached_extension_protocol");
+        portalCapture(ScreenshotPurpose::Capture);
+        return;
+    }
     compositorPending = true;
     qInfo("capture_backend=gnome_compositor_protocol screens=%lld", qlonglong(layout.size()));
     auto *version = new QDBusPendingCallWatcher(
@@ -325,6 +391,7 @@ void WaylandCapture::selectInCompositor() {
         const uint protocol = reply.type() == QDBusMessage::ReplyMessage && !reply.arguments().isEmpty()
                                   ? reply.arguments().first().toUInt()
                                   : 0;
+        compositorProtocol = int(protocol);
         if (protocol < 3) {
             qInfo("capture_fast_fallback=portal reason=extension_protocol version=%u", protocol);
             compositorPending = false;
@@ -352,9 +419,12 @@ void WaylandCapture::openCompositorSelector() {
                 resetSharing();
                 emit compositorSelectionCancelled();
             } else if (error == compositorInterface + ".NotAllowed") {
-                qInfo("capture_fast_fallback=portal reason=not_allowed");
+                qWarning("capture_fast_rejected=not_allowed executable=%s",
+                         qPrintable(QCoreApplication::applicationFilePath()));
                 compositorPending = false;
-                portalCapture(ScreenshotPurpose::Capture);
+                failSharing("GNOME 即时框选拒绝当前可执行文件身份：" +
+                            QCoreApplication::applicationFilePath() +
+                            "。请使用新版扩展，或从正式安装的 /usr/bin/snapling 启动。");
             } else if (error == compositorInterface + ".Busy") {
                 failSharing("GNOME 正在进行其他截图或显示系统对话框。请完成后重试。");
             } else if (error == "org.freedesktop.DBus.Error.UnknownMethod" ||
@@ -439,12 +509,10 @@ void WaylandCapture::openCompositorSelector() {
             QFile file;
             if (!file.open(fd.fileDescriptor(), QIODevice::ReadOnly, QFileDevice::DontCloseHandle) || !file.seek(0))
                 return QImage();
-            QImageReader png(&file, "png");
-            const auto size = png.size();
-            if (size.isEmpty() || qint64(size.width()) * size.height() > 100000000)
-                return QImage();
-            auto image = png.read();
-            image.setDevicePixelRatio(1);
+            QString error;
+            auto image = decodeCaptureImage(file, error);
+            if (image.isNull())
+                qWarning("gnome_handoff_decode_error=%s", qPrintable(error));
             return image;
         }));
     });

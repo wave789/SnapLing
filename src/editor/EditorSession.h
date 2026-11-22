@@ -48,6 +48,7 @@ class EditorSession final : public QObject {
 
   private:
     void initialize();
+    void connectTranslationProvider(ITranslationProvider &provider);
     void connectOcr(IOcrEngine &engine, const char *name);
     void notify(QString message, bool error = false);
     void setTask(Task task);
@@ -59,6 +60,7 @@ class EditorSession final : public QObject {
 #endif
     TesseractOcr tesseract;
     OpenAiTranslationProvider provider;
+    BaiduTranslationProvider baiduProvider;
     Task currentTask = Task::Idle;
     bool translateAfterOcr = false, approvalPending = false;
     qint64 sourceKey = 0;

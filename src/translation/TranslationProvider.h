@@ -1,6 +1,7 @@
 #pragma once
 #include "core/Types.h"
 #include "settings/Settings.h"
+#include <QElapsedTimer>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QObject>
@@ -34,6 +35,27 @@ class OpenAiTranslationProvider final : public ITranslationProvider {
     QPointer<QNetworkReply> reply;
     QTimer timeout;
     bool cancelled = false;
+};
+class BaiduTranslationProvider final : public ITranslationProvider {
+    Q_OBJECT
+  public:
+    explicit BaiduTranslationProvider(QObject *parent = nullptr);
+    void translate(QVector<TranslationUnit>, ProviderConfig) override;
+    void cancel() override;
+    static QString languageCode(QString language);
+    static bool parseResponse(const QByteArray &data, QVector<TranslationUnit> &units, QString &error);
+
+  private:
+    void sendNext();
+    void fail(QString error);
+    QNetworkAccessManager network;
+    QPointer<QNetworkReply> reply;
+    QTimer timeout;
+    bool cancelled = false, requestFailed = false;
+    QElapsedTimer elapsed;
+    QVector<TranslationUnit> allUnits, translated;
+    ProviderConfig activeConfig;
+    int offset = 0;
 };
 QVector<TranslationUnit> translationUnits(const QVector<OcrLine> &lines, QString language,
                                          bool automatic = false);

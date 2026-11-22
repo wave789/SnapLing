@@ -6,6 +6,7 @@
 #include <functional>
 #include <vector>
 class QDBusMessage;
+class QIODevice;
 namespace SnapLing {
 class PortalRequest;
 class PortalConnection;
@@ -28,8 +29,12 @@ class WaylandCapture final : public ICaptureBackend {
     void resetScreenSelection();
     void resetScreenshotPermission();
     bool usesScreenshot(CaptureMode mode, int screen) const;
+    static QImage decodeCaptureImage(QIODevice &device, QString &error);
     void checkScreenshotPermission(std::function<void(bool needsConsent)> callback);
     void authorizeScreenshot();
+    void setCompositorProtocol(int version) {
+        compositorProtocol = version;
+    }
     bool sharing() const {
         return active;
     }
@@ -75,6 +80,7 @@ class WaylandCapture final : public ICaptureBackend {
     bool resettingPermission = false;
     bool compositorPending = false;
     Method method = Method::Screenshot;
+    int compositorProtocol = -1;
     uint screenCastVersion = 0;
     QString requestedScreen;
     QVector<CaptureScreen> layout;

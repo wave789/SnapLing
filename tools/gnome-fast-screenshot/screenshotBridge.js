@@ -1,5 +1,6 @@
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
+import Cogl from 'gi://Cogl';
 import Shell from 'gi://Shell';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
@@ -50,6 +51,20 @@ function allowedExecutables(extensionPath) {
     ]);
 }
 
+function isUserOwnedSnapLingBuild(executable) {
+    if (GLib.path_get_basename(executable) !== 'snapling' ||
+        !executable.startsWith(`${GLib.get_home_dir()}/`))
+        return false;
+    try {
+        const info = Gio.File.new_for_path(executable).query_info(
+            'owner::user,access::can-execute', Gio.FileQueryInfoFlags.NONE, null);
+        return info.get_attribute_boolean('access::can-execute') &&
+            info.get_attribute_string('owner::user') === GLib.get_user_name();
+    } catch {
+        return false;
+    }
+}
+
 function canCapture() {
     return !Main.sessionMode.isLocked && !Main.sessionMode.isGreeter &&
         typeof Shell.Screenshot.prototype.screenshot_stage_to_content === 'function' &&
@@ -77,6 +92,84 @@ async function writeMonitor(selection, stream) {
         x < 0 || y < 0 || w <= 0 || h <= 0 || w * h > 100_000_000 ||
         x + w > texture.get_width() || y + h > texture.get_height())
         throw new Error('invalid selection bounds');
+
+    try {
+        const source = texture.get_width() === w && texture.get_height() === h
+            ? texture
+            : Cogl.SubTexture.new(texture.get_context(), texture, x, y, w, h);
+        const stride = w * 4;
+        // Screenshots are opaque output pixels. Prefer BGRX so a transparent or
+        // premultiplied source alpha can never turn the whole capture invisible.
+        // Keep premultiplied BGRA as a compatibility fallback for Cogl drivers
+        // that cannot convert to BGRX.
+        let readback;
+        for (const candidate of [
+            {format: Cogl.PixelFormat.BGRX_8888, signature: 2, name: 'BGRX_8888'},
+            {format: Cogl.PixelFormat.BGRA_8888_PRE, signature: 1, name: 'BGRA_8888_PRE'},
+        ]) {
+            const pixels = new Uint8Array(stride * h);
+            try {
+                const written = source.get_data(candidate.format, stride, pixels);
+                if (Number.isFinite(written) && written > 0) {
+                    readback = {...candidate, pixels, written};
+                    break;
+                }
+            } catch (error) {
+                console.log(`SnapLing texture format ${candidate.name} unavailable: ${error.message}`);
+            }
+        }
+        if (!readback)
+            throw new Error('texture readback is unavailable');
+        const {pixels, signature} = readback;
+        // Keep a cheap content signature in the journal. A positive byte count with
+        // zero colour samples identifies a Cogl driver that returns an empty buffer.
+        const sampleStep = Math.max(4, Math.floor(pixels.length / 4096 / 4) * 4);
+        let colourSamples = 0;
+        let firstColour = -1;
+        let colourVaried = false;
+        for (let offset = 0; offset + 3 < pixels.length; offset += sampleStep) {
+            const colour = (pixels[offset] << 16) | (pixels[offset + 1] << 8) | pixels[offset + 2];
+            if (colour) {
+                ++colourSamples;
+                if (firstColour < 0)
+                    firstColour = colour;
+                else if (colour !== firstColour)
+                    colourVaried = true;
+            }
+        }
+        if (colourSamples === 0)
+            throw new Error(`texture ${readback.name} returned an empty pixel buffer`);
+        if (!colourVaried)
+            throw new Error(`texture ${readback.name} returned a uniform pixel buffer`);
+
+        // Private raw-pixel container shared with SnapLing:
+        // magic[6], version u16, width i32, height i32, stride i32,
+        // format u32 (1 = premultiplied BGRA, 2 = opaque BGRX), payload size u64.
+        const header = new Uint8Array(32);
+        const view = new DataView(header.buffer);
+        header.set([0x53, 0x4e, 0x52, 0x41, 0x57, 0x31], 0);
+        view.setUint16(6, 1, true);
+        view.setInt32(8, w, true);
+        view.setInt32(12, h, true);
+        view.setInt32(16, stride, true);
+        view.setUint32(20, signature, true);
+        view.setUint32(24, pixels.length, true);
+        view.setUint32(28, 0, true);
+        // Use GLib.Bytes for the large pixel block. write_all(Uint8Array) can report
+        // success without preserving the binary backing store on some GJS versions.
+        for (const block of [header, pixels]) {
+            const result = stream.write_bytes(GLib.Bytes.new(block), null);
+            const success = Array.isArray(result) ? result[0] : result;
+            if (!success)
+                throw new Error('incomplete texture handoff write');
+        }
+        stream.flush(null);
+        console.log(`SnapLing texture handoff ${readback.name}: bytes=${readback.written} ` +
+            `colour_samples=${colourSamples}`);
+        return bounds;
+    } catch (error) {
+        console.log(`SnapLing raw texture handoff unavailable: ${error.message}`);
+    }
 
     // The cursor stays live in the selector and is not included in the monitor texture.
     await Shell.Screenshot.composite_to_stream(texture, x, y, w, h, scale,
@@ -107,7 +200,7 @@ export class ScreenshotBridge {
     }
 
     GetVersion() {
-        return 3;
+        return 4;
     }
 
     async SelectRegionAsync(_params, invocation) {
@@ -137,8 +230,9 @@ export class ScreenshotBridge {
                 return;
             }
             // Compare exact paths obtained from the bus sender's process, not a client-supplied ID.
-            if (!this._allowed.has(executable)) {
-                invocation.return_dbus_error(`${IFACE}.NotAllowed`, 'Only the installed SnapLing executable can request a selection');
+            if (!executable || (!this._allowed.has(executable) && !isUserOwnedSnapLingBuild(executable))) {
+                invocation.return_dbus_error(`${IFACE}.NotAllowed`,
+                    `SnapLing executable identity rejected: ${executable ?? 'unknown'}`);
                 return;
             }
 
@@ -160,7 +254,10 @@ export class ScreenshotBridge {
             const [file, stream] = Gio.File.new_tmp('snapling-selected-XXXXXX');
             io = stream;
             file.delete(null);
+            const encodeStart = GLib.get_monotonic_time();
             const bounds = await writeMonitor(selection, io.get_output_stream());
+            const encodeMs = (GLib.get_monotonic_time() - encodeStart) / 1000;
+            console.log(`SnapLing monitor handoff encoded in ${encodeMs.toFixed(1)} ms`);
             if (request.cancelled) {
                 this._replyCancelled(invocation);
                 return;
