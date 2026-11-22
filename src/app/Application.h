@@ -29,11 +29,14 @@ class Application final : public QObject {
     void capture(CaptureMode mode = CaptureMode::Region, bool ocr = false, bool translate = false,
                  int delay = 0, bool explicitConsent = false);
     void beginCapture();
-    void prepareDesktopCapture();
+    void prepareDesktopCapture(bool mainWasVisible = false);
     void scheduleCapture(int milliseconds);
+    void showConsentWindow();
     void requestConsentWhenFocused();
-    void activateMainWindow();
+    void presentWindow(QWidget &window);
+    void activatePresentedWindow();
     bool finishConsent();
+    void reportCaptureFailure(const QString &message);
     void restoreWindows();
     void showCaptureOverlays(CaptureFrame frame);
     void closeCaptureOverlays(SelectionOverlay *except = nullptr);
@@ -42,7 +45,7 @@ class Application final : public QObject {
     bool preparing = false;
     enum class Consent { None, Checking, WaitingForFocus, Requesting };
     Consent consent = Consent::None;
-    bool mainShownForConsent = false, mainWasMinimized = false;
+    std::unique_ptr<QDialog> consentWindow;
     quint64 captureGeneration = 0;
     void edit(QImage image, bool ocr = false, bool translate = false);
     void edit(std::shared_ptr<EditorSession> session);
@@ -60,7 +63,8 @@ class Application final : public QObject {
     QMainWindow main;
     QComboBox *modeBox, *screenBox;
     QLabel *status, *hotkeyStatus;
-    QString captureActivationToken, mainActivationToken;
+    QString captureActivationToken, windowActivationToken;
+    QPointer<QWidget> activationTarget;
     QPointer<QProgressDialog> countdown;
     QSystemTrayIcon tray;
     CaptureMode pendingMode = CaptureMode::Region;

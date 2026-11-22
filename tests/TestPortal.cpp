@@ -14,8 +14,17 @@ class WindowProbe : public QObject {
     Q_CLASSINFO("D-Bus Interface", "io.snapling.Test.WindowProbe")
   public slots:
     QString MainWindowState() const {
+        return windowState("snaplingMainWindow");
+    }
+    QString ScreenshotConsentState() const {
+        if (MainWindowState() != "hidden")
+            return "main-visible";
+        return windowState("screenshotConsentWindow");
+    }
+  private:
+    QString windowState(const QString &name) const {
         for (auto *widget : QApplication::topLevelWidgets()) {
-            if (qobject_cast<QMainWindow *>(widget) && widget->isVisible())
+            if (widget->objectName() == name && widget->isVisible())
                 return widget->isActiveWindow() ? "focused" : "visible";
         }
         return "hidden";
@@ -78,6 +87,7 @@ class TestPortal : public QObject {
         QCOMPARE(frame.image.size(), QSize(240, 320));
         QCOMPARE(frame.image.pixelColor(0, 0), QColor(0x22, 0x88, 0x55));
         QCOMPARE(probe.MainWindowState(), QString("hidden"));
+        QCOMPARE(probe.ScreenshotConsentState(), QString("hidden"));
         int overlays = 0;
         for (auto *widget : QApplication::topLevelWidgets()) {
             if (qobject_cast<SelectionOverlay *>(widget) && widget->isVisible())

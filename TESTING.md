@@ -25,9 +25,11 @@ HTTP 测试服务器仅作为 **测试替身**，生产代码通过 QNetworkAcce
 /usr/bin/python3 tools/test-portal-identity.py --portal /usr/libexec/xdg-desktop-portal
 ```
 
-工具会在私有 D-Bus、独立 XDG 目录中启动真实 Portal 前端。权限库、Access 和 Screenshot 后端使用测试替身。测试先复现缺少桌面入口的注册错误，再执行生产入口安装脚本。已注册的后台应用请求截图时，Access 按 GNOME 的焦点规则拒绝，前端返回 `code=2`，权限仍为 `unset`。随后测试通过生产 `Application` 触发截图，Access 在主窗口获得焦点后同意。截图后端按主窗口是否可见返回不同颜色的图片，测试验证编辑器只收到隐藏窗口后获取的图片。测试不会接触用户桌面。Portal 可执行文件路径按发行版调整。
+工具会在私有 D-Bus、独立 XDG 目录中启动真实 Portal 前端。权限库、Access 和 Screenshot 后端使用测试替身。测试先复现缺少桌面入口的注册错误，再执行生产入口安装脚本。已注册的后台应用请求截图时，Access 按 GNOME 的焦点规则拒绝，前端返回 `code=2`，权限仍为 `unset`。随后测试通过生产 `Application` 触发截图，主窗口隐藏，Access 在独立的截图授权窗口获得焦点后同意。截图后端按截图授权窗口是否可见返回不同颜色的图片，测试验证编辑器只收到隐藏授权窗口后取得的图片。测试不会接触用户桌面。Portal 可执行文件路径按发行版调整。
 
 另在隔离的 GNOME Shell/Mutter 48.7 Wayland 会话中运行了 SnapLing、Ubuntu 26.04 的 xdg-desktop-portal 1.21.1、GNOME 截图后端 48.0 和真实权限库。在其他应用拥有焦点时，已注册的后台截图请求返回 2，系统日志为 `Only the focused app is allowed to show a system access dialog`。新流程在主窗口获得焦点后显示 GNOME 授权弹窗。用鼠标点击允许，SnapLing 隐藏主窗口，取得三个 800×600 虚拟显示器的 2400×600 桌面图。在第三屏拖选后立即出现标注工具栏。再次触发时只请求一次截图。此桌面验证使用命令触发和鼠标操作，物理外接显示器与用户设备上的系统快捷键仍需实机验证。[系统授权弹窗](docs/validation/gnome-screenshot-consent.jpg) · [第三屏拖选后的工具栏](docs/validation/gnome-third-display-edit.jpg)
+
+主窗口后台行为在隔离 X11 会话中使用真实鼠标点击「开始截图」和原生 Ctrl+Alt+A 验证。框选后通过工具栏取消或按 Esc，主窗口保持隐藏，进程继续运行。通过私有 StatusNotifier 托盘服务触发「打开 SnapLing」可再次显示主窗口，普通图标激活和「取消截图」均保持后台。命令取消延时截图后，倒计时结束也不会触发截图。GNOME Wayland 另外使用真实系统授权弹窗验证了独立的「截图授权」窗口，点击允许后进入选区，取消并再次截图时主窗口一直隐藏。此 Wayland 用例通过命令触发。
 
 同一 GNOME 环境的三屏闪光对照测试使用 `--force-animations`，并在每个屏幕分别以 60 帧每秒采样像素。`org.gnome.desktop.interface enable-animations` 为 `true` 时三屏均出现白闪，为 `false` 时三屏均未出现白闪。两种设置下同一个单次截图入口均取得 2400×600 PNG 并显示三块选区覆盖层。GNOME 50 的截图后端同样请求 `flash=true`，Shell 的闪光采用遵循该动画设置的过渡。[GNOME 50 截图后端](https://github.com/GNOME/xdg-desktop-portal-gnome/blob/50.0/src/screenshotdialog.c#L247-L255) · [GNOME 50.1 动画设置](https://github.com/GNOME/gnome-shell/blob/50.1/js/misc/animationUtils.js#L13-L31)
 

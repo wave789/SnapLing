@@ -179,7 +179,6 @@ Application::Application(QObject *p, std::unique_ptr<ICaptureBackend> captureBac
         });
         connect(wayland, &WaylandCapture::compositorSelectionCancelled, this, [this] {
             cancelCapture();
-            status->setText("截图已取消。");
         });
         capabilities->setText(capabilities->text() + "\n" + wayland->capabilities());
         auto *regrant = new QPushButton("重新请求截图授权");
@@ -228,34 +227,18 @@ Application::Application(QObject *p, std::unique_ptr<ICaptureBackend> captureBac
         if (!capturing)
             return;
         if (frame.image.isNull()) {
-            capturing = false;
-            restoreWindows();
-            status->setText("截图后端返回空图像");
-            show();
+            reportCaptureFailure("截图后端返回空图像");
             return;
         }
         qInfo("capture_ms=%lld trigger_to_pixels_ms=%lld screens=%lld", frame.captureMs,
               captureTimer.elapsed(), qlonglong(frame.screens.size()));
         if (pendingMode == CaptureMode::Window && !backend->hasWindowPicking())
             status->setText("在 SnapLing 选区中框选窗口内容，松开鼠标后即可标注。");
+        else
+            status->clear();
         showCaptureOverlays(std::move(frame));
     });
-    connect(backend.get(), &ICaptureBackend::failed, this, [this](QString e) {
-        qWarning("capture_failed stage=%s reason=%s", captureOverlays.isEmpty() ? "capture" : "editing", qPrintable(e));
-        status->setText(e);
-        status->setStyleSheet("QLabel{color:#d62f36;border:1px solid #d62f36;padding:10px;}");
-        // 已冻结的截图与共享流独立；共享中断不能丢弃正在编辑的文档。
-        if (!captureOverlays.isEmpty())
-            return;
-        capturing = false;
-        closeCaptureOverlays();
-        preparing = false;
-        finishConsent();
-        restoreWindows();
-        show();
-        if (tray.isVisible())
-            tray.showMessage("截图失败", e, QSystemTrayIcon::Warning, 8000);
-    });
+    connect(backend.get(), &ICaptureBackend::failed, this, &Application::reportCaptureFailure);
     connect(hotkey.get(), &IHotkeyBackend::activated, this, [this] { capture(); });
     connect(hotkey.get(), &IHotkeyBackend::activationTokenAvailable, this,
             [this](QString token) { captureActivationToken = std::move(token); });
@@ -270,14 +253,10 @@ Application::Application(QObject *p, std::unique_ptr<ICaptureBackend> captureBac
         auto *menu = new QMenu(&main);
         menu->addAction("截图", this, [this] { capture(); });
         menu->addAction("取消截图", this, &Application::cancelCapture);
-        menu->addAction("打开 SnapLing", this, [this] { show(); });
+        menu->addAction("打开 SnapLing", this, &Application::show);
         menu->addAction("设置", this, [this] { settingsDialog(); });
         menu->addAction("退出", qApp, &QCoreApplication::quit);
         tray.setContextMenu(menu);
-        connect(&tray, &QSystemTrayIcon::activated, this, [this](auto reason) {
-            if (reason == QSystemTrayIcon::Trigger)
-                show();
-        });
         tray.show();
     }
     applyTheme();
@@ -286,6 +265,10 @@ Application::Application(QObject *p, std::unique_ptr<ICaptureBackend> captureBac
 Application::~Application() {
     backend->cancel();
     closeCaptureOverlays();
+    consentWindow.reset();
+    main.removeEventFilter(this);
+    if (auto *window = main.windowHandle())
+        window->removeEventFilter(this);
     hotkey->unbind();
     QList<QWidget *> editors;
     for (auto *w : QApplication::topLevelWidgets())
@@ -317,33 +300,39 @@ void Application::bindHotkeys() {
     }
 }
 void Application::show() {
+    presentWindow(main);
+}
+void Application::presentWindow(QWidget &window) {
     const bool wayland = QGuiApplication::platformName().startsWith("wayland");
     if (wayland) {
         // Qt can request a startup token both on show() and activateWindow(). An unconsumed
         // token leaves GNOME's busy cursor active until its startup notification times out.
-        main.setAttribute(Qt::WA_ShowWithoutActivating);
-        mainActivationToken = captureActivationToken;
+        window.setAttribute(Qt::WA_ShowWithoutActivating);
+        activationTarget = &window;
+        windowActivationToken = captureActivationToken;
     }
     captureActivationToken.clear();
-    if (main.isMinimized())
-        main.setWindowState(main.windowState() & ~Qt::WindowMinimized);
-    main.show();
+    if (window.isMinimized())
+        window.setWindowState(window.windowState() & ~Qt::WindowMinimized);
+    window.show();
     if (wayland) {
-        if (auto *window = main.windowHandle())
-            window->installEventFilter(this);
-        activateMainWindow();
+        if (auto *handle = window.windowHandle())
+            handle->installEventFilter(this);
+        activatePresentedWindow();
     } else {
-        main.raise();
-        main.activateWindow();
+        window.raise();
+        window.activateWindow();
     }
 }
-void Application::activateMainWindow() {
-    auto *window = main.windowHandle();
-    if (mainActivationToken.isEmpty() || !main.isVisible() || !window || !window->isExposed())
+void Application::activatePresentedWindow() {
+    if (windowActivationToken.isEmpty() || !activationTarget || !activationTarget->isVisible())
+        return;
+    auto *window = activationTarget->windowHandle();
+    if (!window || !window->isExposed())
         return;
     const auto previous = qgetenv("XDG_ACTIVATION_TOKEN");
-    qputenv("XDG_ACTIVATION_TOKEN", mainActivationToken.toUtf8());
-    mainActivationToken.clear();
+    qputenv("XDG_ACTIVATION_TOKEN", windowActivationToken.toUtf8());
+    windowActivationToken.clear();
     window->requestActivate();
     if (previous.isNull())
         qunsetenv("XDG_ACTIVATION_TOKEN");
@@ -351,16 +340,16 @@ void Application::activateMainWindow() {
         qputenv("XDG_ACTIVATION_TOKEN", previous);
 }
 bool Application::eventFilter(QObject *o, QEvent *e) {
-    if (o == main.windowHandle() && e->type() == QEvent::Expose && !mainActivationToken.isEmpty())
-        activateMainWindow();
-    if (o == &main && e->type() == QEvent::Hide)
-        mainActivationToken.clear();
-    if (consent == Consent::WaitingForFocus &&
-        ((o == &main && e->type() == QEvent::WindowActivate) ||
-         (o == main.windowHandle() && e->type() == QEvent::Expose)))
+    if (activationTarget && o == activationTarget->windowHandle() && e->type() == QEvent::Expose)
+        activatePresentedWindow();
+    if (o == activationTarget.data() && e->type() == QEvent::Hide) {
+        activationTarget.clear();
+        windowActivationToken.clear();
+    }
+    if (consent == Consent::WaitingForFocus && consentWindow &&
+        ((o == consentWindow.get() && e->type() == QEvent::WindowActivate) ||
+         (o == consentWindow->windowHandle() && e->type() == QEvent::Expose)))
         QTimer::singleShot(0, this, &Application::requestConsentWhenFocused);
-    if (o == &main && e->type() == QEvent::Close && consent != Consent::None)
-        cancelCapture();
     if (o == &main && e->type() == QEvent::Close && settings.value("general/background", true).toBool()) {
         main.hide();
         static_cast<QCloseEvent *>(e)->ignore();
@@ -371,10 +360,11 @@ bool Application::eventFilter(QObject *o, QEvent *e) {
     return QObject::eventFilter(o, e);
 }
 void Application::capture(CaptureMode mode, bool ocr, bool translate, int delay, bool explicitConsent) {
+    const bool mainWasVisible = main.isVisible();
+    main.hide();
     if (capturing || countdown || preparing) {
         if (consent == Consent::WaitingForFocus) {
-            show();
-            requestConsentWhenFocused();
+            showConsentWindow();
             return;
         }
         if (!captureOverlays.isEmpty()) {
@@ -395,9 +385,7 @@ void Application::capture(CaptureMode mode, bool ocr, bool translate, int delay,
         if (qobject_cast<EditorWindow *>(w))
             ++editors;
     if (editors >= 8) {
-        restoreWindows();
-        status->setText("已有 8 个编辑窗口，请关闭暂不需要的窗口后继续截图。");
-        show();
+        reportCaptureFailure("已有 8 个编辑窗口，请关闭暂不需要的窗口后继续截图。");
         return;
     }
     preparing = true;
@@ -414,35 +402,50 @@ void Application::capture(CaptureMode mode, bool ocr, bool translate, int delay,
     auto *wayland = qobject_cast<WaylandCapture *>(backend.get());
     if (wayland && wayland->usesScreenshot(pendingMode, pendingScreen) && (explicitConsent || isGnomeSession())) {
         consent = Consent::Checking;
-        wayland->checkScreenshotPermission([this, job = captureGeneration](bool needsConsent) {
+        wayland->checkScreenshotPermission([this, job = captureGeneration, mainWasVisible](bool needsConsent) {
             if (!preparing || job != captureGeneration || consent != Consent::Checking)
                 return;
             if (!needsConsent) {
-                prepareDesktopCapture();
+                prepareDesktopCapture(mainWasVisible);
                 return;
             }
             // GNOME Shell verifies the focused application's desktop ID before it opens AccessDialog.
-            mainShownForConsent = !main.isVisible();
-            mainWasMinimized = main.isMinimized();
             consent = Consent::WaitingForFocus;
-            status->setText("首次截图需要系统授权。请点击此窗口，然后在系统询问时允许 SnapLing 截图。");
-            show();
-            if (auto *window = main.windowHandle())
-                window->installEventFilter(this);
-            QTimer::singleShot(0, this, &Application::requestConsentWhenFocused);
+            status->setText("首次截图需要系统授权。请在截图授权窗口中继续。");
+            showConsentWindow();
         });
         return;
     }
 #else
     Q_UNUSED(explicitConsent)
 #endif
-    prepareDesktopCapture();
+    prepareDesktopCapture(mainWasVisible);
+}
+void Application::showConsentWindow() {
+    if (!consentWindow) {
+        consentWindow = std::make_unique<QDialog>();
+        consentWindow->setObjectName("screenshotConsentWindow");
+        consentWindow->setWindowTitle("SnapLing · 截图授权");
+        consentWindow->setWindowIcon(main.windowIcon());
+        auto *layout = new QVBoxLayout(consentWindow.get());
+        auto *instructions = new QLabel("请点击此窗口，然后在系统提示中允许 SnapLing 截图。");
+        instructions->setWordWrap(true);
+        layout->addWidget(instructions);
+        auto *buttons = new QDialogButtonBox(QDialogButtonBox::Cancel);
+        buttons->button(QDialogButtonBox::Cancel)->setText("取消截图");
+        layout->addWidget(buttons);
+        connect(buttons, &QDialogButtonBox::rejected, consentWindow.get(), &QDialog::reject);
+        connect(consentWindow.get(), &QDialog::rejected, this, &Application::cancelCapture);
+        consentWindow->installEventFilter(this);
+    }
+    presentWindow(*consentWindow);
+    QTimer::singleShot(0, this, &Application::requestConsentWhenFocused);
 }
 void Application::requestConsentWhenFocused() {
 #ifndef Q_OS_WIN
-    auto *window = main.windowHandle();
+    auto *window = consentWindow ? consentWindow->windowHandle() : nullptr;
     if (consent != Consent::WaitingForFocus || !window || !window->isExposed() ||
-        !main.isActiveWindow() || QGuiApplication::focusWindow() != window)
+        !consentWindow->isActiveWindow() || QGuiApplication::focusWindow() != window)
         return;
     consent = Consent::Requesting;
     status->setText("请在系统窗口中允许 SnapLing 截图。授权完成后将自动截取桌面。");
@@ -451,23 +454,20 @@ void Application::requestConsentWhenFocused() {
 #endif
 }
 bool Application::finishConsent() {
-    const bool usedMain = consent == Consent::WaitingForFocus || consent == Consent::Requesting;
+    const bool wasVisible = consentWindow && consentWindow->isVisible();
     consent = Consent::None;
-    if (usedMain) {
-        if (mainShownForConsent)
-            main.hide();
-        if (mainWasMinimized)
-            main.setWindowState(main.windowState() | Qt::WindowMinimized);
-    }
-    return usedMain;
+    if (wasVisible)
+        consentWindow->hide();
+    return wasVisible;
 }
-void Application::prepareDesktopCapture() {
-    bool ownVisible = finishConsent();
+void Application::prepareDesktopCapture(bool mainWasVisible) {
+    bool ownVisible = finishConsent() || mainWasVisible;
     status->setText("正在获取桌面截图…");
     for (auto *w : QApplication::topLevelWidgets())
         if (w->isVisible() && w->windowType() != Qt::Popup) {
             ownVisible = true;
-            hiddenWindows << w;
+            if (w != &main)
+                hiddenWindows << w;
             w->hide();
         }
     const int delay = pendingDelay;
@@ -480,13 +480,7 @@ void Application::prepareDesktopCapture() {
         countdown->setValue(0);
         auto *timer = new QTimer(countdown);
         timer->setInterval(1000);
-        connect(countdown, &QProgressDialog::canceled, this, [this] {
-            if (countdown)
-                countdown->deleteLater();
-            countdown = nullptr;
-            preparing = false;
-            restoreWindows();
-        });
+        connect(countdown, &QProgressDialog::canceled, this, &Application::cancelCapture);
         connect(timer, &QTimer::timeout, this, [this, timer, delay] {
             if (!countdown) {
                 timer->stop();
@@ -562,10 +556,7 @@ void Application::showCaptureOverlays(CaptureFrame frame) {
             for (auto *screen : QGuiApplication::screens())
                 found |= screen->name() == view.screenName || screen->geometry().contains(view.desktop.center().toPoint());
             if (!found) {
-                capturing = false;
-                restoreWindows();
-                status->setText("无法匹配截图所在显示器，请检查屏幕连接并重新截图。");
-                show();
+                reportCaptureFailure("无法匹配截图所在显示器，请检查屏幕连接并重新截图。");
                 return;
             }
         }
@@ -601,8 +592,7 @@ void Application::showCaptureOverlays(CaptureFrame frame) {
         connect(overlay, &SelectionOverlay::cancelled, this, [this, overlay] {
             closeCaptureOverlays(overlay);
             captureOverlays.clear();
-            capturing = false;
-            restoreWindows();
+            cancelCapture();
         });
         connect(overlay, &SelectionOverlay::ready, this, [this, overlay, compositorSelection] {
             qInfo("%s=%lld screen=%s", compositorSelection ? "trigger_to_quick_edit_ms" : "trigger_to_selection_ms",
@@ -698,6 +688,7 @@ void Application::applyTheme() {
         qApp->setStyleSheet("");
 }
 void Application::cancelCapture() {
+    const bool wasCapturing = preparing || capturing;
     ++captureGeneration;
     preparing = false;
     capturing = false;
@@ -711,6 +702,19 @@ void Application::cancelCapture() {
     finishConsent();
     closeCaptureOverlays();
     restoreWindows();
+    if (wasCapturing)
+        status->setText("截图已取消。");
+}
+void Application::reportCaptureFailure(const QString &message) {
+    qWarning("capture_failed stage=%s reason=%s", captureOverlays.isEmpty() ? "capture" : "editing", qPrintable(message));
+    // 已冻结的截图与共享流独立；共享中断时继续保留当前的编辑。
+    const bool editing = !captureOverlays.isEmpty();
+    if (!editing)
+        cancelCapture();
+    status->setText(message);
+    status->setStyleSheet("QLabel{color:#d62f36;border:1px solid #d62f36;padding:10px;}");
+    if (!editing && tray.isVisible())
+        tray.showMessage("截图失败", message, QSystemTrayIcon::Warning, 8000);
 }
 void Application::historyDialog() {
     QDialog dialog(&main);
@@ -794,7 +798,6 @@ void Application::command(QStringList args) {
     captureActivationToken = value("--activation-token");
     if (args.contains("--cancel-capture")) {
         cancelCapture();
-        show();
         return;
     }
     if (args.contains("--open")) {

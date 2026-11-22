@@ -63,7 +63,7 @@ def worker(args):
             GLib.Variant("(s)", (window_probe,)), None, Gio.DBusCallFlags.NONE, 2000, None).unpack()
         if not owned:
             return "hidden"
-        state, = bus.call_sync(window_probe, "/probe", window_probe, "MainWindowState", None, None,
+        state, = bus.call_sync(window_probe, "/probe", window_probe, "ScreenshotConsentState", None, None,
                                Gio.DBusCallFlags.NONE, 2000, None).unpack()
         return state
 

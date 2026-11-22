@@ -470,7 +470,7 @@ void WaylandCapture::reportScreenshotFailure(ScreenshotPurpose purpose) {
             failSharing(error + "截图连接已注册，系统记录为允许。请在终端查看本次截图服务错误：\n"
                         "journalctl --user -b -u xdg-desktop-portal -u xdg-desktop-portal-gnome -n 40 --no-pager");
         else if (purpose == ScreenshotPurpose::Authorize && own == "unset")
-            failSharing(error + "系统尚未返回 SnapLing 的授权决定。请点击主窗口的“开始截图”，保持它在前台，直到系统显示授权窗口。"
+            failSharing(error + "系统尚未返回 SnapLing 的授权决定。请重新截图，并将 SnapLing 截图授权窗口置于前台。"
                         "如果仍无弹窗，请运行：\njournalctl --user -b -u xdg-desktop-portal -u xdg-desktop-portal-gnome -n 40 --no-pager");
         else if (screenshotConnection->hasRegisteredIdentity())
             failSharing(error + "本次截图连接已注册为 SnapLing，未发现 SnapLing 的已保存拒绝。请查看系统截图服务日志；未识别主机应用的拒绝记录不用于本次请求。");

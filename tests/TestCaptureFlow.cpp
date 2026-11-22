@@ -172,7 +172,7 @@ class ScreenshotPortal : public QObject, protected QDBusContext {
     RegistryState *registry = nullptr;
     bool respectPermissions = false;
     // Model GNOME Shell's AccessDialog focus check only in the GNOME consent tests.
-    QPointer<QMainWindow> consentWindow;
+    bool checkConsentFocus = false;
     QString consentFrameUri;
     QList<bool> focusedAtRequest, visibleAtRequest;
   public slots:
@@ -188,8 +188,14 @@ class ScreenshotPortal : public QObject, protected QDBusContext {
         const bool denied = respectPermissions && permissions->records.value(id).contains("no");
         uint response = denied ? 2 : code;
         QString resultUri = uri;
-        if (consentWindow) {
-            const bool visible = consentWindow->isVisible();
+        if (checkConsentFocus) {
+            QWidget *consentWindow = nullptr;
+            for (auto *widget : QApplication::topLevelWidgets())
+                if (widget->objectName() == "screenshotConsentWindow") {
+                    consentWindow = widget;
+                    break;
+                }
+            const bool visible = consentWindow && consentWindow->isVisible();
             const bool focused = visible && consentWindow->isActiveWindow() &&
                                  QGuiApplication::focusWindow() == consentWindow->windowHandle();
             visibleAtRequest << visible;
@@ -395,7 +401,7 @@ class TestCaptureFlow : public QObject {
         screenshot.requests.clear();
         screenshot.focusedAtRequest.clear();
         screenshot.visibleAtRequest.clear();
-        screenshot.consentWindow = nullptr;
+        screenshot.checkConsentFocus = false;
         screenshot.code = 0;
         screenshot.respectPermissions = false;
         registryState = {};
@@ -446,16 +452,17 @@ class TestCaptureFlow : public QObject {
         QFETCH(int, shape);
         QFETCH(bool, quickReady);
         Application app(nullptr, backend());
+        app.show();
+        auto *main = windows<QMainWindow>().first();
         if (shape < 0)
             app.command({command});
         else {
-            app.show();
-            auto *main = windows<QMainWindow>().first();
             main->findChild<QComboBox *>()->setCurrentIndex(shape);
             for (auto *button : main->findChildren<QPushButton *>())
                 if (button->text() == "开始截图")
                     button->click();
         }
+        QVERIFY(!main->isVisible());
         QTRY_COMPARE_WITH_TIMEOUT(windows<SelectionOverlay>().size(), 1, 5000);
 #ifdef SNAPLING_HAVE_PIPEWIRE
         QVERIFY(screenshot.requests.isEmpty());
@@ -494,6 +501,7 @@ class TestCaptureFlow : public QObject {
             QTest::keyClick(overlay->canvasWidget(), Qt::Key_Return);
             QTRY_COMPARE(windows<EditorWindow>().size(), 1);
             QCOMPARE(windows<EditorWindow>().first()->document(), document);
+            QVERIFY(!main->isVisible());
         }
     }
 #ifdef SNAPLING_HAVE_PIPEWIRE
@@ -578,7 +586,9 @@ class TestCaptureFlow : public QObject {
         QVERIFY(windows<SelectionOverlay>().isEmpty());
         QCOMPARE(control->started, 0);
         auto *main = windows<QMainWindow>().first();
-        QVERIFY(main->isVisible());
+        QTRY_VERIFY(!main->findChild<QLabel *>("captureStatus")->styleSheet().isEmpty());
+        QVERIFY(!main->isVisible());
+        app.show();
         screenCast.nodeList = all;
         bool clicked = false;
         for (auto *button : main->findChildren<QPushButton *>())
@@ -781,7 +791,9 @@ class TestCaptureFlow : public QObject {
         screenCast.startCode = 1;
         Application app(nullptr, backend());
         app.command({"--capture"});
-        QTRY_VERIFY(windows<QMainWindow>().first()->isVisible());
+        auto *main = windows<QMainWindow>().first();
+        QTRY_VERIFY(!main->findChild<QLabel *>("captureStatus")->styleSheet().isEmpty());
+        QVERIFY(!main->isVisible());
         QVERIFY(windows<SelectionOverlay>().isEmpty());
         QVERIFY(screenshot.requests.isEmpty());
         screenCast.startCode = 0;
@@ -1065,10 +1077,12 @@ class TestCaptureFlow : public QObject {
         screenshot.respectPermissions = true;
         Application app(nullptr, backend(false));
         auto *main = windows<QMainWindow>().first();
-        screenshot.consentWindow = main;
+        screenshot.checkConsentFocus = true;
         screenshot.consentFrameUri = screenshot.uri;
         app.command({"--capture"});
         QTRY_VERIFY(main->findChild<QLabel *>("captureStatus")->text().contains("已记住"));
+        QVERIFY(!main->isVisible());
+        app.show();
         auto *retry = main->findChild<QPushButton *>("retryScreenshotPermission");
         QVERIFY(retry);
         QVERIFY(retry->isVisible());
@@ -1103,7 +1117,7 @@ class TestCaptureFlow : public QObject {
         QSignalSpy frames(capture.get(), &ICaptureBackend::captured);
         Application app(nullptr, std::move(capture));
         auto *main = windows<QMainWindow>().first();
-        screenshot.consentWindow = main;
+        screenshot.checkConsentFocus = true;
         // Reproduce the reported failure with an already registered but unfocused client.
         auto unfocused = backend(false);
         QSignalSpy denied(unfocused.get(), &ICaptureBackend::failed);
@@ -1123,6 +1137,7 @@ class TestCaptureFlow : public QObject {
         } else {
             app.command({"--full"});
         }
+        QVERIFY(!main->isVisible());
         QTRY_COMPARE_WITH_TIMEOUT(windows<SelectionOverlay>().size(), 1, 5000);
         auto *overlay = windows<SelectionOverlay>().first();
         QCOMPARE(screenshot.visibleAtRequest, (QList<bool>{true, false}));
@@ -1138,6 +1153,7 @@ class TestCaptureFlow : public QObject {
         QCOMPARE(overlay->session()->document.original().pixelColor(10, 20), QColor(Qt::red));
         overlay->close();
         QTRY_VERIFY(windows<SelectionOverlay>().isEmpty());
+        QVERIFY(!main->isVisible());
         // The next shortcut is one real capture, without showing the consent window.
         app.command({"--full"});
         QTRY_COMPARE(windows<SelectionOverlay>().size(), 1);
@@ -1150,13 +1166,16 @@ class TestCaptureFlow : public QObject {
         screenshot.consentFrameUri = screenshot.uri;
         Application app(nullptr, backend(false));
         auto *main = windows<QMainWindow>().first();
-        screenshot.consentWindow = main;
+        screenshot.checkConsentFocus = true;
         app.command({"--capture"});
         QTRY_COMPARE(screenshot.focusedAtRequest, QList<bool>{true});
         app.command({"--cancel-capture"});
         QTest::qWait(400);
         QCOMPARE(screenshot.requests.size(), 1);
         QVERIFY(windows<SelectionOverlay>().isEmpty());
+        QVERIFY(!main->isVisible());
+        for (auto *dialog : windows<QDialog>())
+            QVERIFY(!dialog->isVisible());
         screenshot.delay = 0;
         app.command({"--capture"});
         QTRY_COMPARE(windows<SelectionOverlay>().size(), 1);
@@ -1168,11 +1187,11 @@ class TestCaptureFlow : public QObject {
         permissionStore.records[""] = {"no"};
         Application app(nullptr, backend(false));
         auto *main = windows<QMainWindow>().first();
-        screenshot.consentWindow = main;
+        screenshot.checkConsentFocus = true;
         app.command({"--full"});
         auto *status = main->findChild<QLabel *>("captureStatus");
         QTRY_VERIFY(status->text().contains("journalctl --user"));
-        QVERIFY(status->isVisible());
+        QVERIFY(!main->isVisible());
         QVERIFY(status->text().contains("前台"));
         QCOMPARE(screenshot.focusedAtRequest, QList<bool>{true});
         QCOMPARE(permissionStore.writes, 0);
@@ -1194,14 +1213,16 @@ class TestCaptureFlow : public QObject {
         screenshot.consentFrameUri = screenshot.uri;
         Application app(nullptr, backend(false));
         auto *main = windows<QMainWindow>().first();
-        screenshot.consentWindow = main;
+        screenshot.checkConsentFocus = true;
         app.command({"--capture"});
         QTRY_VERIFY(main->findChild<QLabel *>("captureStatus")->text().contains(statusMessage));
+        QVERIFY(!main->isVisible());
         QVERIFY(windows<SelectionOverlay>().isEmpty());
         QCOMPARE(permissionStore.writes, 0);
         QVERIFY(!screenshot.focusedAtRequest.contains(true));
         screenshot.visibleAtRequest.clear();
         screenshot.focusedAtRequest.clear();
+        app.show();
         auto *retry = main->findChild<QPushButton *>("retryScreenshotPermission");
         QVERIFY(retry && retry->isVisible());
         QTest::mouseClick(retry, Qt::LeftButton);
@@ -1233,7 +1254,7 @@ class TestCaptureFlow : public QObject {
         QTRY_COMPARE(reset.size(), 1);
         QVERIFY(screenshot.requests.isEmpty());
     }
-    void captureFailuresAreVisibleAndRetryable_data() {
+    void captureFailuresStayInBackgroundAndCanRetry_data() {
         QTest::addColumn<int>("code");
         QTest::addColumn<bool>("badLayout");
         QTest::addColumn<QString>("message");
@@ -1241,7 +1262,7 @@ class TestCaptureFlow : public QObject {
         QTest::newRow("cancelled") << 1 << false << "响应码 1";
         QTest::newRow("wrong-layout") << 0 << true << "不匹配";
     }
-    void captureFailuresAreVisibleAndRetryable() {
+    void captureFailuresStayInBackgroundAndCanRetry() {
         QFETCH(int, code);
         QFETCH(bool, badLayout);
         QFETCH(QString, message);
@@ -1256,7 +1277,9 @@ class TestCaptureFlow : public QObject {
         auto *status = main->findChild<QLabel *>("captureStatus");
         QVERIFY(status);
         QTRY_VERIFY(status->text().contains(message));
-        QVERIFY(main->isVisible());
+        QVERIFY(!main->isVisible());
+        QVERIFY(!status->isVisible());
+        app.show();
         QVERIFY(!main->isMinimized());
         QVERIFY(status->isVisible());
         QVERIFY(!status->styleSheet().isEmpty());
@@ -1355,7 +1378,8 @@ class TestCaptureFlow : public QObject {
         QSignalSpy errors(capture.get(), &ICaptureBackend::failed);
         Application app(nullptr, std::move(capture));
         app.show();
-        auto *status = windows<QMainWindow>().first()->findChild<QLabel *>("captureStatus");
+        auto *main = windows<QMainWindow>().first();
+        auto *status = main->findChild<QLabel *>("captureStatus");
         QVERIFY(status);
 
         app.command({"--capture"});
@@ -1363,6 +1387,7 @@ class TestCaptureFlow : public QObject {
         QVERIFY(compositorBus.send(compositor.pending.createErrorReply("io.snapling.Screenshot1.Cancelled", "Esc")));
         QTRY_COMPARE(cancelled.size(), 1);
         QTRY_COMPARE(status->text(), QString("截图已取消。"));
+        QVERIFY(!main->isVisible());
         QVERIFY(windows<SelectionOverlay>().isEmpty());
         QVERIFY(errors.isEmpty());
 
@@ -1377,6 +1402,7 @@ class TestCaptureFlow : public QObject {
         QTRY_COMPARE(errors.size(), 1);
         QTRY_COMPARE(compositor.cancellations, 1);
         QVERIFY(errors.first().first().toString().contains("无法匹配 GNOME 返回的选区"));
+        QVERIFY(!main->isVisible());
         QVERIFY(windows<SelectionOverlay>().isEmpty());
         QVERIFY(screenshot.requests.isEmpty());
         QCOMPARE(screenCast.created, 0);
@@ -1384,7 +1410,16 @@ class TestCaptureFlow : public QObject {
     void clickSelectsMonitorAndDragSelectsRegion() {
         for (bool drag : {false, true}) {
             Application app(nullptr, backend(false));
-            app.command({"--capture"});
+            app.show();
+            auto *main = windows<QMainWindow>().first();
+            if (drag) {
+                auto *button = main->findChild<QPushButton *>("captureButton");
+                QVERIFY(button);
+                QTest::mouseClick(button, Qt::LeftButton);
+            } else {
+                app.command({"--capture"});
+            }
+            QVERIFY(!main->isVisible());
             QTRY_COMPARE(windows<SelectionOverlay>().size(), 1);
             auto *overlay = windows<SelectionOverlay>().first();
             QEnterEvent enter({50, 50}, {50, 50}, {50, 50});
@@ -1397,8 +1432,13 @@ class TestCaptureFlow : public QObject {
             QCOMPARE(overlay->session()->document.original().size(), drag ? QSize(150, 120) : image.size());
             QVERIFY(overlay->findChild<QFrame *>("quickToolbar")->isVisible());
             QVERIFY(windows<EditorWindow>().isEmpty());
-            overlay->close();
+            QTest::keyClick(overlay->canvasWidget(), Qt::Key_Escape);
             QTRY_VERIFY(windows<SelectionOverlay>().isEmpty());
+            QVERIFY(!main->isVisible());
+            app.command({"--cancel-capture"});
+            QVERIFY(!main->isVisible());
+            app.show();
+            QVERIFY(main->isVisible());
         }
         QCOMPARE(screenCast.created, 0);
     }
