@@ -55,6 +55,7 @@ class Application final : public QObject {
     void applyTheme();
     void cancelCapture();
     void bindHotkeys();
+    void configureGnomeCaptureAcceleration();
     Settings settings;
     ProviderConfig config;
     std::unique_ptr<ICaptureBackend> backend;
@@ -70,6 +71,7 @@ class Application final : public QObject {
     CaptureMode pendingMode = CaptureMode::Region;
     bool pendingOcr = false, pendingTranslation = false, capturing = false;
     int remaining = 0, pendingDelay = 0, pendingScreen = -1;
+    int visibleWindowSettleMs = 300;
     QElapsedTimer captureTimer;
 };
 } // namespace SnapLing

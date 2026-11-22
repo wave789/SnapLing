@@ -56,7 +56,7 @@ function canCapture() {
         typeof Shell.Screenshot.composite_to_stream === 'function';
 }
 
-async function writeCrop(selection, stream) {
+async function writeMonitor(selection, stream) {
     const {snapshot: {bounds: source, content, scale}, area, monitor} = selection;
     const localX = area.x - monitor.x;
     const localY = area.y - monitor.y;
@@ -66,17 +66,19 @@ async function writeCrop(selection, stream) {
         throw new Error('invalid selection');
 
     const texture = content.get_texture();
-    const x = Math.round((area.x - source.x) * scale);
-    const y = Math.round((area.y - source.y) * scale);
-    const w = Math.round((area.x + area.width - source.x) * scale) - x;
-    const h = Math.round((area.y + area.height - source.y) * scale) - y;
+    // Keep the complete monitor so the Qt layer can move or enlarge the initial
+    // selection without asking the compositor for a second frozen frame.
+    const x = Math.round((monitor.x - source.x) * scale);
+    const y = Math.round((monitor.y - source.y) * scale);
+    const w = Math.round((monitor.x + monitor.width - source.x) * scale) - x;
+    const h = Math.round((monitor.y + monitor.height - source.y) * scale) - y;
     if (localX < 0 || localY < 0 || area.width <= 0 || area.height <= 0 ||
         localX + area.width > monitor.width || localY + area.height > monitor.height ||
         x < 0 || y < 0 || w <= 0 || h <= 0 || w * h > 100_000_000 ||
         x + w > texture.get_width() || y + h > texture.get_height())
         throw new Error('invalid selection bounds');
 
-    // The cursor stays live in the selector and is not included in the selected pixels.
+    // The cursor stays live in the selector and is not included in the monitor texture.
     await Shell.Screenshot.composite_to_stream(texture, x, y, w, h, scale,
         null, 0, 0, 1, stream);
     stream.flush(null);
@@ -105,7 +107,7 @@ export class ScreenshotBridge {
     }
 
     GetVersion() {
-        return 1;
+        return 3;
     }
 
     async SelectRegionAsync(_params, invocation) {
@@ -147,7 +149,7 @@ export class ScreenshotBridge {
                 this._cancel(request);
                 return GLib.SOURCE_REMOVE;
             });
-            request.selector = new RegionSelector();
+            request.selector = new RegionSelector(pid);
             const selection = await request.selector.select();
             if (!selection || request.cancelled) {
                 this._replyCancelled(invocation);
@@ -158,7 +160,7 @@ export class ScreenshotBridge {
             const [file, stream] = Gio.File.new_tmp('snapling-selected-XXXXXX');
             io = stream;
             file.delete(null);
-            const bounds = await writeCrop(selection, io.get_output_stream());
+            const bounds = await writeMonitor(selection, io.get_output_stream());
             if (request.cancelled) {
                 this._replyCancelled(invocation);
                 return;
@@ -175,7 +177,7 @@ export class ScreenshotBridge {
                 this._replyCancelled(invocation);
             } else {
                 console.warn(`SnapLing selection failed: ${error.message}`);
-                invocation.return_dbus_error(`${IFACE}.Failed`, 'Could not prepare the selected image');
+                invocation.return_dbus_error(`${IFACE}.Failed`, 'Could not prepare the monitor image');
             }
         } finally {
             if (this._handoff?.request !== request) {

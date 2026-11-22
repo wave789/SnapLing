@@ -12,6 +12,7 @@
 #include <QDBusPendingReply>
 #include <QDBusUnixFileDescriptor>
 #include <QFile>
+#include <QFileInfo>
 #include <QFutureWatcher>
 #include <QGuiApplication>
 #include <QImageReader>
@@ -30,6 +31,13 @@ static const QString permissionService = "org.freedesktop.impl.portal.Permission
 static const QString permissionPath = "/org/freedesktop/impl/portal/PermissionStore";
 static const QString applicationId = "io.snapling.SnapLing";
 static const QString compositorInterface = "io.snapling.Screenshot1";
+static bool isGnomeDesktop() {
+    const auto desktops = qEnvironmentVariable("XDG_CURRENT_DESKTOP").split(':', Qt::SkipEmptyParts);
+    if (desktops.contains("GNOME", Qt::CaseInsensitive))
+        return true;
+    const auto session = QFileInfo(qEnvironmentVariable("XDG_SESSION_DESKTOP")).completeBaseName().toLower();
+    return session.startsWith("gnome") || session.startsWith("ubuntu");
+}
 static QDBusMessage compositorCall(const QString &method) {
     return QDBusMessage::createMethodCall("org.gnome.Shell", "/io/snapling/Screenshot", compositorInterface, method);
 }
@@ -46,7 +54,10 @@ QVector<CaptureScreen> WaylandCapture::currentScreens() const {
 }
 WaylandCapture::WaylandCapture(QObject *p, StreamFactory factory, ScreenProvider screens)
     : ICaptureBackend(p), streamFactory(std::move(factory)), screenProvider(std::move(screens)) {
-    method = methodFromSetting(Settings().value("capture/waylandMethod", "screenshot").toString());
+    const auto configured = Settings().value("capture/waylandMethod");
+    method = methodFromSetting(configured.isValid()
+                                   ? configured.toString()
+                                   : (isGnomeDesktop() ? QStringLiteral("compositor") : QStringLiteral("screenshot")));
     frameTimer.setInterval(20);
     connect(&frameTimer, &QTimer::timeout, this, &WaylandCapture::deliverFrame);
     auto changed = [this] {
@@ -303,6 +314,29 @@ void WaylandCapture::requestScreenshot(ScreenshotPurpose purpose) {
 void WaylandCapture::selectInCompositor() {
     const auto job = generation;
     compositorPending = true;
+    qInfo("capture_backend=gnome_compositor_protocol screens=%lld", qlonglong(layout.size()));
+    auto *version = new QDBusPendingCallWatcher(
+        QDBusConnection::sessionBus().asyncCall(compositorCall("GetVersion"), 1500), this);
+    connect(version, &QDBusPendingCallWatcher::finished, this, [this, job, version] {
+        const auto reply = version->reply();
+        version->deleteLater();
+        if (job != generation)
+            return;
+        const uint protocol = reply.type() == QDBusMessage::ReplyMessage && !reply.arguments().isEmpty()
+                                  ? reply.arguments().first().toUInt()
+                                  : 0;
+        if (protocol < 3) {
+            qInfo("capture_fast_fallback=portal reason=extension_protocol version=%u", protocol);
+            compositorPending = false;
+            portalCapture(ScreenshotPurpose::Capture);
+            return;
+        }
+        openCompositorSelector();
+    });
+}
+void WaylandCapture::openCompositorSelector() {
+    const auto job = generation;
+    compositorPending = true;
     qInfo("capture_backend=gnome_compositor screens=%lld", qlonglong(layout.size()));
     auto *call = new QDBusPendingCallWatcher(
         QDBusConnection::sessionBus().asyncCall(compositorCall("SelectRegion"), 100000), this);
@@ -318,16 +352,22 @@ void WaylandCapture::selectInCompositor() {
                 resetSharing();
                 emit compositorSelectionCancelled();
             } else if (error == compositorInterface + ".NotAllowed") {
-                failSharing("GNOME 快速框选只接受已安装的 SnapLing。请退出旧实例，从安装目录启动新版。");
+                qInfo("capture_fast_fallback=portal reason=not_allowed");
+                compositorPending = false;
+                portalCapture(ScreenshotPurpose::Capture);
             } else if (error == compositorInterface + ".Busy") {
                 failSharing("GNOME 正在进行其他截图或显示系统对话框。请完成后重试。");
             } else if (error == "org.freedesktop.DBus.Error.UnknownMethod" ||
                        error == "org.freedesktop.DBus.Error.UnknownObject" ||
                        error == "org.freedesktop.DBus.Error.UnknownInterface" ||
                        error == "org.freedesktop.DBus.Error.ServiceUnknown") {
-                failSharing("GNOME 快速框选扩展尚未生效。请在设置 → 通用中启用提速，更新扩展后需重新登录。");
+                qInfo("capture_fast_fallback=portal reason=extension_unavailable");
+                compositorPending = false;
+                portalCapture(ScreenshotPurpose::Capture);
             } else {
-                failSharing("GNOME 快速框选失败：" + reply.errorMessage().left(240));
+                qInfo("capture_fast_fallback=portal reason=%s", qPrintable(error));
+                compositorPending = false;
+                portalCapture(ScreenshotPurpose::Capture);
             }
             return;
         }
@@ -370,6 +410,7 @@ void WaylandCapture::selectInCompositor() {
         frame.desktop = output->desktop;
         frame.screenName = output->name;
         frame.selectionComplete = true;
+        frame.fullMonitorImage = true;
         frame.selectionViewport = selected;
         QElapsedTimer handoff;
         handoff.start();

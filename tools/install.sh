@@ -32,6 +32,7 @@ if [[ "$snapling_bindir" != bin ]]; then
 fi
 
 if [[ -d .deps/usr ]]; then source tools/dev-env.sh; fi
+python3 tools/prepare-paddleocr-runtime.py --output build/paddleocr-runtime
 mkdir -p -- "$snapling_prefix"
 snapling_prefix="$(cd "$snapling_prefix" && pwd -P)"
 env -u DESTDIR cmake --install build --prefix "$snapling_prefix"
@@ -41,8 +42,6 @@ if [[ -d .deps/usr ]]; then
     python3 tools/bundle-linux.py "$snapling_prefix"
     snapling_executable="$snapling_prefix/snapling"
 fi
-./tools/install-paddleocr-models.sh
-
 snapling_applications="$snapling_prefix/share/applications"
 env -u DESTDIR cmake \
     -DSNAPLING_DESKTOP_SOURCE_RUN=ON \

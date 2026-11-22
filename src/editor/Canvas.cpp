@@ -126,7 +126,7 @@ void Canvas::selectAllText() {
 void Canvas::paintEvent(QPaintEvent *) {
     QPainter p(this);
     if (!overlayMode)
-        p.fillRect(rect(), QColor("#252b36"));
+        p.fillRect(rect(), palette().color(QPalette::Window));
     if (cached.isNull())
         return;
     auto t = sourceToWidget();
@@ -307,7 +307,7 @@ void Canvas::keyPressEvent(QKeyEvent *e) {
         emit copyRequested();
         return;
     }
-    if (e->matches(QKeySequence::SelectAll) && activeTool == Tool::Ocr) {
+    if (e->matches(QKeySequence::SelectAll)) {
         selectAllText();
         return;
     }

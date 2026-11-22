@@ -2,12 +2,12 @@
 
 ## Ubuntu 24.04 / 26.04
 
-最低 Qt 6.4，CMake 3.22，C++20。主程序和默认 Tesseract 不依赖 Python，可选 RapidOCR 使用独立的 Python 虚拟环境。Ubuntu 24.04 使用发行版 Qt 6.4.2，Ubuntu 26.04 使用 Qt 6.10.2。Qt 插件须匹配运行库版本。
+最低 Qt 6.4，CMake 3.22，C++20。Ubuntu 24.04 使用发行版 Qt 6.4.2，Ubuntu 26.04 使用 Qt 6.10.2。正式 Linux 包内置 PaddleOCR 运行环境；构建机只需在首次打包时联网准备一次，用户安装后不需要运行初始化脚本。
 
 ```bash
 sudo apt update
-sudo apt install build-essential cmake ninja-build file pkg-config libxkbcommon-dev qt6-base-dev qt6-wayland qt6-svg-dev \
-  libtesseract-dev libpipewire-0.3-dev libx11-dev libxrandr-dev libxcb1-dev \
+sudo apt install build-essential cmake ninja-build file pkg-config python3-venv libxkbcommon-dev qt6-base-dev qt6-wayland qt6-gtk-platformtheme qt6-svg-dev \
+  libpipewire-0.3-dev libx11-dev libxrandr-dev libxcb1-dev \
   libzxing-dev xvfb xauth xdotool fonts-noto-cjk
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel 4
@@ -15,7 +15,7 @@ ctest --test-dir build --output-on-failure
 ./tools/run.sh
 ```
 
-模型已包含在 `models/tessdata`。开发环境可设置 `TESSDATA_PREFIX`，或在设置中手动选模型目录。Windows 多配置构建的测试已由 CTest 指定源码模型路径。
+PaddleOCR 模型和 `inference.yml` 已包含在 `src/assets/models/PaddleOCR`。`tools/build.sh` 会调用 `tools/prepare-paddleocr-runtime.py`，固定 RapidOCR/ONNX Runtime 版本并生成 `build/paddleocr-runtime`。已有同版本运行时后该步骤直接复用，不再次联网。没有 `python3-venv` 时也可在构建机安装 `uv`，脚本会使用 `uv venv --seed`。
 
 无管理员权限时：
 
@@ -31,7 +31,7 @@ cmake --build build --parallel 4
 
 源码启动请使用 `tools/run.sh`。它在 Qt 初始化前自动写入当前用户的 `io.snapling.SnapLing.desktop`，供 Wayland Portal 查找应用身份；不需要先安装完整项目或使用 sudo。入口指向当前源码启动脚本的绝对路径，保留本地开发依赖环境。默认写入 `~/.local/share/applications`，遵循 `XDG_DATA_HOME`；准备失败会停止启动并报告路径。只需准备入口时可运行 `tools/install-desktop.sh`。直接执行 `build/snapling` 不执行这一步。
 
-Wayland 默认使用非交互式 Screenshot Portal，支持单次完整桌面和多屏即时框选，不依赖 PipeWire。默认构建 `-DSNAPLING_PIPEWIRE=ON` 额外提供 ScreenCast 兼容截图，需要 `libpipewire-0.3-dev`；关闭此选项不影响默认单次截图。`-DSNAPLING_TESSERACT=OFF` 编译不含 Tesseract 的诊断构建，常规交付请开启此选项。ZXing 缺失时二维码入口明确报告不可用。Linux 即使 Wayland 运行也需要 X11 开发库以构建 X11 兼容后端。
+Ubuntu GNOME Wayland 默认通过随包扩展在合成器内即时框选，扩展不可用时回退到非交互式 Screenshot Portal。默认构建 `-DSNAPLING_PIPEWIRE=ON` 额外提供 ScreenCast 兼容截图，需要 `libpipewire-0.3-dev`；关闭此选项不影响即时框选和系统单次截图。正式构建默认 `-DSNAPLING_TESSERACT=OFF`，仅保留 PaddleOCR；历史 Tesseract 回归测试可显式启用该选项。ZXing 缺失时二维码入口明确报告不可用。Linux 即使 Wayland 运行也需要 X11 开发库以构建 X11 兼容后端。
 
 ## Linux 安装
 
@@ -43,7 +43,7 @@ Wayland 默认使用非交互式 Screenshot Portal，支持单次完整桌面和
 
 程序、资源和文档统一安装到 `~/.local/snapling`。脚本会把该目录内的桌面入口链接到 `${XDG_DATA_HOME:-$HOME/.local/share}/applications`，供应用菜单和截图 Portal 查找。可从应用菜单启动，或运行安装完成时打印的绝对路径。通过 `.deps` 构建时，脚本会一并收集运行库并在安装根目录生成 `snapling` 启动器。
 
-重复执行可更新安装。安装脚本同时补齐 `~/.snapling/ocr/paddleocr` 下的 ONNX 与 YAML。若旧进程在运行，请从托盘退出后启动新版。可用 `./tools/install.sh --prefix /绝对路径` 更换用户安装目录。构建 DEB 或执行系统安装时，继续使用相应的打包脚本或 `cmake --install build --prefix /usr/local`。系统安装把模型资源放入前缀的 `share/snapling/models/paddleocr`，用户运行 `setup-rapidocr.py` 时复制到自己的模型目录。
+重复执行可更新安装。安装脚本会把 PaddleOCR 的 ONNX、`inference.yml` 和固定推理环境直接放到安装前缀的 `share/snapling`，不写用户 OCR 配置。若旧进程在运行，请从托盘退出后启动新版。可用 `./tools/install.sh --prefix /绝对路径` 更换用户安装目录。
 
 ```bash
 ./tools/package-linux.sh
@@ -52,7 +52,7 @@ Wayland 默认使用非交互式 Screenshot Portal，支持单次完整桌面和
 
 生成便携目录、tar.gz 和 DEB。便携入口设置相对库、插件和模型路径，附带可替换的动态库及许可证。DEB 使用目标发行版的运行库，`dpkg-shlibdeps` 根据实际构建生成依赖。只打 DEB 时可以运行 `(cd build && umask 022 && cpack -G DEB)`。
 
-DEB 同时安装可选的 GNOME 截图提速扩展。`dpkg -i` 安装完成后可以直接用默认单次截图。若要使用 GNOME 快速框选，在 SnapLing 的「设置 → 通用」中启用「单次截图提速」，再选择「GNOME 快速框选（松手即编辑）」。首次安装或升级扩展后，可注销重新登录以加载新代码。新系统缺少 DEB 运行依赖时，用 `apt install ./<安装包>.deb` 让 apt 一并解决。操作方法见 [GNOME 截图提速](docs/GNOME_FLASH.md)。
+DEB 同时安装 GNOME 即时框选扩展和完整 PaddleOCR 运行环境。应用启动时会尝试启用扩展；首次安装或升级扩展后注销并重新登录一次，让 GNOME 加载新代码。之后主截图快捷键默认立即显示选区，扩展失效时自动回退。新系统安装 DEB 时使用 `apt install ./<安装包>.deb`，让 apt 一并处理 Qt 等系统依赖。
 
 从源码运行或用户安装切换到 DEB 时，GNOME 可能会优先使用旧的用户桌面入口。可先退出正在运行的 SnapLing，再执行 `/usr/bin/snapling` 打开包内版本。
 
@@ -67,6 +67,7 @@ AppImage 方案：从 [linuxdeploy](https://github.com/linuxdeploy/linuxdeploy/r
 ```powershell
 vcpkg install tesseract:x64-windows
 cmake -S . -B build -A x64 `
+  -DSNAPLING_TESSERACT=ON `
   -DCMAKE_PREFIX_PATH=C:/Qt/6.5.3/msvc2019_64 `
   -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake
 cmake --build build --config Release --parallel 4

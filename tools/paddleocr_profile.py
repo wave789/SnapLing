@@ -90,7 +90,7 @@ def make_engine(model_dir):
         params["Rec.rec_keys_path"] = str(vocab)
 
         engine = RapidOCR(params=params)
-        # These hooks are from the RapidOCR version pinned by setup-rapidocr.py.
+        # These hooks are from the RapidOCR version pinned by prepare-paddleocr-runtime.py.
         classifier = engine._load_cls_model()
         cls_session = classifier.session.session
         if (cls_session.get_inputs()[0].shape[1:] != [3, cls_height, cls_width] or

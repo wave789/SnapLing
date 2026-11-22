@@ -36,7 +36,6 @@ class EditorSession final : public QObject {
     void approveTranslation(bool allowed);
     void cancel();
     void copyImage();
-    void copyTranslation();
     void requestSave(QWidget *parent);
     void saveImage(QString path);
 
@@ -55,11 +54,10 @@ class EditorSession final : public QObject {
     void startTranslation();
     void setTranslationEnabled(bool enabled);
     bool sourceUnchanged();
-    TesseractOcr tesseract;
 #ifndef Q_OS_WIN
-    RapidOcr rapidOcr;
     RapidOcr paddleOcr{RapidOcr::Profile::Paddle};
 #endif
+    TesseractOcr tesseract;
     OpenAiTranslationProvider provider;
     Task currentTask = Task::Idle;
     bool translateAfterOcr = false, approvalPending = false;

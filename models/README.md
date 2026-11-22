@@ -1,23 +1,25 @@
 # 离线 OCR 模型
 
-默认 OCR 引擎为 Tesseract 5 LSTM。Linux 可按项目 README 的步骤另外安装 RapidOCR，并在设置中切换。RapidOCR 的模型来自官方 Python 发行包，保存在 `~/.snapling/ocr/RapidOCR/models`。
+SnapLing 的 OCR 固定使用 PaddleOCR PP-OCRv6 Small，源代码中的模型位于：
 
-可选的 PaddleOCR 配置使用项目 `src/assets/models/PaddleOCR` 下的 PP-OCRv6 Small 检测、识别和文字方向模型。Linux 用户安装将三份 ONNX 和对应的 `inference.yml` 分别复制到 `~/.snapling/ocr/paddleocr/{det,rec,cls}`。识别时从 YAML 读取文本检测阈值、方向预处理和识别字符表。两种 ONNX 模式共用 `setup-rapidocr.py` 准备的 CPU 运行环境。
-
-随仓库部署的模型来自 Ubuntu 26.04 `tesseract-ocr-eng`、`tesseract-ocr-chi-sim` 软件包，版本 `1:4.1.0-2build1`；上游 [tessdata_fast](https://github.com/tesseract-ocr/tessdata_fast)。许可证 **Apache-2.0**，发行版版权记录见 `TESSDATA-LICENSE`，许可证正文见上游与发行版版权文件。
-
-精确文件大小、版本、来源及 SHA256 在 `manifest.json`。
-
-```bash
-cd models
-sha256sum -c SHA256SUMS
+```text
+src/assets/models/PaddleOCR/
+  det/PP-OCRv6_small_det.onnx
+  det/inference.yml
+  rec/PP-OCRv6_small_rec.onnx
+  rec/inference.yml
+  cls/PP-OCR_text_angle.onnx
+  cls/inference.yml
 ```
 
-- `eng.traineddata`：4,113,088 bytes（实际以 manifest 为准），英文。
-- `chi_sim.traineddata`：约 2.4 MiB，简体中文；与英文可组合 `chi_sim+eng`。
+`.deb` 会把上述文件原样安装到 `/usr/share/snapling/models/paddleocr`，并把固定的 CPU 推理环境安装到 `/usr/share/snapling/paddleocr-runtime`。安装后不需要复制模型、选择模型目录或运行下载脚本。
 
-随附位置为 `<prefix>/share/snapling/tessdata` 或源码的 `models/tessdata`。首次自动识别时，SnapLing 将随附的 Tesseract 默认模型复制到 `~/.snapling/ocr/tesseract`，保留已有模型文件。显式选择的目录或有效的 `TESSDATA_PREFIX` 仍可使用。
+构建时运行：
 
-手动导入支持完全离线部署：从可信上游/发行版取得相应 traineddata，核对下载方提供的 SHA256，在设置 → OCR 中选择目录；「查看模型大小与 SHA256」展示当前文件摘要。任意手动模型不会被误标成官方原始哈希一致，用户负责校验其可信来源。推理失败会报告错误，不会使用伪造结果。
+```bash
+python3 tools/prepare-paddleocr-runtime.py --output build/paddleocr-runtime
+```
 
-Tesseract 在首次 OCR 时加载模型，默认可缓存，取消缓存则识别完成后释放。RapidOCR 在每次识别时按需启动，安装脚本会准备模型和依赖。
+该命令固定 RapidOCR `3.10.0` 与 ONNX Runtime `1.26.0`，生成的 `.runtime.json` 记录 Python ABI、工具版本和工作脚本 SHA256。相同运行时可复用；脚本或模型配置变化后重新运行即可更新。DEB 构建机需要联网一次，目标机器不需要。
+
+`models/tessdata`、`SHA256SUMS` 和 `TESSDATA-LICENSE` 仅保留给显式启用 `-DSNAPLING_TESSERACT=ON` 的历史回归测试，不属于默认安装或正式 DEB。

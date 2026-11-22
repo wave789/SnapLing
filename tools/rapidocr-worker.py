@@ -52,7 +52,7 @@ def rapid_engine():
     for stage, (filename, _) in MODELS.items():
         path = models / filename
         if not path.is_file():
-            raise RuntimeError(f"本地模型缺失：{path}。请重新运行 setup-rapidocr.py。")
+            raise RuntimeError(f"本地模型缺失：{path}。请重新安装 SnapLing。")
         params[f"{stage}.model_path"] = str(path)
     return RapidOCR(params=params)
 
@@ -63,7 +63,7 @@ def recognize(input_path, paddle_models=None):
         from rapidocr.utils.download_file import DownloadFile
 
         def missing_resource(*args, **kwargs):
-            raise RuntimeError("本地模型缺少所需资源。请重新运行 setup-rapidocr.py。")
+            raise RuntimeError("本地模型缺少所需资源。请重新安装 SnapLing。")
 
         # The worker is offline even if a replacement model is missing a dictionary.
         DownloadFile.run = missing_resource

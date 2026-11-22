@@ -222,7 +222,7 @@ static bool isFilePath(const QString &text) {
 }
 static bool shouldTranslate(const OcrLine &line, const QVector<OcrLine> &lines, const QString &language) {
     const auto text = line.text.trimmed();
-    if (line.confidence < .55 || line.box.isEmpty())
+    if (line.confidence < .25 || line.box.isEmpty())
         return false;
     static const QRegularExpression identifier(R"(^[A-Za-z0-9]+(?:_[A-Za-z0-9]+)+$)");
     static const QRegularExpression filename(

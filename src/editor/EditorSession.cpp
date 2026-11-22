@@ -47,11 +47,10 @@ void EditorSession::initialize() {
         if (currentTask == Task::Idle && !approvalPending)
             setTranslationEnabled(document.state().translationMode != 0 && !document.state().translations.isEmpty());
     });
-    connectOcr(tesseract, "tesseract");
 #ifndef Q_OS_WIN
-    connectOcr(rapidOcr, "rapidocr");
     connectOcr(paddleOcr, "paddleocr");
 #endif
+    connectOcr(tesseract, "tesseract");
     connect(&provider, &ITranslationProvider::completed, this, [this](auto units, qint64 ms) {
         setTask(Task::Idle);
         if (!translationEnabled)
@@ -130,15 +129,19 @@ void EditorSession::runOcr(bool thenTranslate) {
     notify("正在本地识别文字… 可继续编辑");
     IOcrEngine *engine = &tesseract;
 #ifndef Q_OS_WIN
-    const auto engineId = settings.value("ocr/engine").toString();
-    if (engineId == "rapidocr")
-        engine = &rapidOcr;
-    else if (engineId == "paddleocr")
-        engine = &paddleOcr;
+    engine = &paddleOcr;
+    // Kept only for the native regression suite; installed builds always use PaddleOCR.
+    if (qEnvironmentVariable("SNAPLING_OCR_TEST_ENGINE") == "tesseract")
+        engine = &tesseract;
 #endif
-    engine->recognize(document.original(), settings.value("ocr/path").toString(),
-                      settings.value("ocr/languages", "chi_sim+eng").toString(),
-                      settings.value("ocr/cache", true).toBool());
+#ifndef Q_OS_WIN
+    if (engine == &paddleOcr)
+        engine->recognize(document.original(), RapidOcr::modelDirectory(), "chinese_english", true);
+    else
+#endif
+        engine->recognize(document.original(), settings.value("ocr/path").toString(),
+                          settings.value("ocr/languages", "chi_sim+eng").toString(),
+                          settings.value("ocr/cache", true).toBool());
 }
 void EditorSession::translate(QVector<OcrLine> selected) {
     if (currentTask != Task::Idle || approvalPending) {
@@ -224,24 +227,15 @@ void EditorSession::cancel() {
     translateAfterOcr = false;
     if (approvalPending)
         approveTranslation(false);
-    tesseract.cancel();
 #ifndef Q_OS_WIN
-    rapidOcr.cancel();
     paddleOcr.cancel();
 #endif
+    tesseract.cancel();
     provider.cancel();
 }
 void EditorSession::copyImage() {
     QApplication::clipboard()->setImage(document.render());
     notify("已复制当前图片");
-}
-void EditorSession::copyTranslation() {
-    QStringList text;
-    for (const auto &unit : document.state().translations)
-        if (unit.status == "done")
-            text << unit.target;
-    QApplication::clipboard()->setText(text.join('\n'));
-    notify("已复制译文");
 }
 void EditorSession::requestSave(QWidget *parent) {
     const auto format = settings.value("general/format", "PNG").toString();

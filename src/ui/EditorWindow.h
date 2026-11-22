@@ -4,7 +4,6 @@
 #include "editor/EditorSession.h"
 #include "settings/Settings.h"
 #include "translation/TranslationProvider.h"
-#include <QDockWidget>
 #include <QMainWindow>
 namespace SnapLing {
 class EditorWindow final : public QMainWindow {
@@ -32,13 +31,11 @@ class EditorWindow final : public QMainWindow {
     void exportText();
     void sensitive();
     void requestTranslationApproval(QString endpoint);
-    void editTranslation();
     std::shared_ptr<EditorSession> editing;
     Settings &settings;
     Document &doc;
     Canvas *canvas;
     QString savedPath;
     QAction *cancelAction;
-    QDockWidget *comparison;
 };
 } // namespace SnapLing

@@ -19,6 +19,7 @@
 #include <QTcpSocket>
 #include <QTemporaryDir>
 #include <QTextEdit>
+#include <QToolBar>
 #include <QToolButton>
 #include <QtTest>
 #include <X11/Xlib.h>
@@ -61,7 +62,8 @@ class TestQuickEdit : public QObject {
             }
         QFAIL(qPrintable("未找到工具：" + text));
     }
-    void capture(QRect region = QRect(15, 15, 765, 475), bool sendMove = true, bool nativeMouse = false) {
+    void capture(QRect region = QRect(15, 15, 765, 475), bool sendMove = true, bool nativeMouse = false,
+                 bool confirm = true) {
         control({"windowfocus", targetWindow});
         control({"key", "Escape"});
         QTest::qWait(80);
@@ -98,6 +100,11 @@ class TestQuickEdit : public QObject {
             control({"mouseup", "1"});
         else
             QTest::mouseRelease(overlay, Qt::LeftButton, Qt::NoModifier, to);
+        QTRY_VERIFY(overlay->isSelectionReady());
+        if (confirm)
+            QTest::keyClick(overlay, Qt::Key_Return);
+        else
+            return;
         QTRY_COMPARE(overlay->phase(), SelectionOverlay::Phase::QuickEditing);
         QVERIFY(overlay->canvasWidget()->isVisible());
         QCOMPARE(overlay->winId(), windowId);
@@ -214,6 +221,59 @@ class TestQuickEdit : public QObject {
         QCOMPARE(overlay->session()->document.state().annotations.size(), 1);
         QVERIFY(windows<EditorWindow>().isEmpty());
     }
+    void adjustSelectionBeforeEditing() {
+        capture(QRect(80, 70, 420, 260), true, false, false);
+        QVERIFY(overlay && overlay->isSelectionReady());
+        auto *toolbar = overlay->findChild<QFrame *>("quickToolbar");
+        QVERIFY(toolbar && toolbar->isVisible());
+        QVERIFY(overlay->canvasWidget());
+        QVERIFY(!overlay->canvasWidget()->isVisible());
+        QVERIFY(overlay->grab().save(QCoreApplication::applicationDirPath() + "/selection-adjust.png"));
+
+        const auto initial = overlay->selectionWidgetRect();
+        const auto initialToolbarPosition = toolbar->pos();
+        const auto center = initial.center();
+        QTest::mousePress(overlay, Qt::LeftButton, Qt::NoModifier, center);
+        QTest::mouseMove(overlay, center + QPoint(35, 22), 20);
+        QTest::mouseRelease(overlay, Qt::LeftButton, Qt::NoModifier, center + QPoint(35, 22));
+        QVERIFY(overlay->isSelectionReady());
+        QCOMPARE(overlay->selectionWidgetRect().size(), initial.size());
+        QCOMPARE(overlay->selectionWidgetRect().topLeft(), initial.topLeft() + QPoint(35, 22));
+        QVERIFY(toolbar->pos() != initialToolbarPosition);
+
+        const auto moved = overlay->selectionWidgetRect();
+        const auto movedCenter = moved.center();
+        QTest::mousePress(overlay, Qt::LeftButton, Qt::NoModifier, movedCenter);
+        QTest::mouseMove(overlay, movedCenter + QPoint(-8, 5), 20);
+        QTest::mouseRelease(overlay, Qt::LeftButton, Qt::NoModifier, movedCenter + QPoint(-8, 5));
+        QVERIFY(overlay->isSelectionReady());
+        QCOMPARE(overlay->selectionWidgetRect().topLeft(), moved.topLeft() + QPoint(-8, 5));
+
+        const auto movedAgain = overlay->selectionWidgetRect();
+        const auto bottomRight = movedAgain.bottomRight();
+        QTest::mousePress(overlay, Qt::LeftButton, Qt::NoModifier, bottomRight);
+        QTest::mouseMove(overlay, bottomRight + QPoint(45, 30), 20);
+        QTest::mouseRelease(overlay, Qt::LeftButton, Qt::NoModifier, bottomRight + QPoint(45, 30));
+        QVERIFY(overlay->isSelectionReady());
+        const auto resized = overlay->selectionWidgetRect();
+        QVERIFY(qAbs(resized.width() - movedAgain.width() - 45) <= 1);
+        QVERIFY(qAbs(resized.height() - movedAgain.height() - 30) <= 1);
+
+        const auto left = QPoint(resized.left(), resized.center().y());
+        QTest::mousePress(overlay, Qt::LeftButton, Qt::NoModifier, left);
+        QTest::mouseMove(overlay, left + QPoint(-15, 0), 20);
+        QTest::mouseRelease(overlay, Qt::LeftButton, Qt::NoModifier, left + QPoint(-15, 0));
+        QVERIFY(overlay->isSelectionReady());
+        const auto resizedAgain = overlay->selectionWidgetRect();
+        QVERIFY(qAbs(resizedAgain.width() - resized.width() - 15) <= 1);
+
+        click("箭头");
+        QTRY_COMPARE(overlay->phase(), SelectionOverlay::Phase::QuickEditing);
+        QVERIFY(overlay->canvasWidget()->isVisible());
+        const qreal dpr = overlay->devicePixelRatioF();
+        QCOMPARE(overlay->session()->document.original().size(),
+                 QSize(qRound(resizedAgain.width() * dpr), qRound(resizedAgain.height() * dpr)));
+    }
     void nativeMouseRelease() {
         capture(QRect(15, 15, 765, 475), true, true);
         QVERIFY(overlay);
@@ -233,10 +293,15 @@ class TestQuickEdit : public QObject {
         QTRY_COMPARE(overlay->selection().size().toSize(), expected);
         QVERIFY(!overlay->canvasWidget());
         control({"click", "1"});
+        QTRY_VERIFY(overlay->isSelectionReady());
+        QTest::keyClick(overlay, Qt::Key_Return);
         QTRY_COMPARE(overlay->phase(), SelectionOverlay::Phase::QuickEditing);
         QCOMPARE(overlay->winId(), id);
         QCOMPARE(overlay->session()->document.original().size(), expected);
         QVERIFY(overlay->findChild<QFrame *>("quickToolbar")->isVisible());
+        auto *border = overlay->findChild<QFrame *>("selectionGreenBorder");
+        QVERIFY(border && border->isVisible());
+        QCOMPARE(border->geometry().size(), overlay->rect().adjusted(1, 1, -1, -1).size());
         draw("箭头", {60, 60}, {180, 180});
         QCOMPARE(overlay->session()->document.state().annotations.size(), 1);
         QVERIFY(windows<EditorWindow>().isEmpty());
@@ -282,17 +347,18 @@ class TestQuickEdit : public QObject {
         const auto &document = overlay->session()->document;
         QCOMPARE(document.state().annotations.size(), 1);
         QVERIFY(document.render() != document.original());
-        click("复制译文");
+        auto *canvas = overlay->canvasWidget();
+        QTest::keyClick(canvas, Qt::Key_A, Qt::ControlModifier);
+        QTest::keyClick(canvas, Qt::Key_C, Qt::ControlModifier);
         QVERIFY(QApplication::clipboard()->text().contains("你好世界"));
-        auto *mode = overlay->findChild<QMenu *>("translationViewMenu");
-        QVERIFY(mode);
-        mode->actions().at(2)->trigger();
-        QCOMPARE(document.state().translationMode, 2);
     }
     void iconToolbarAndTranslationToggle() {
         capture({20, 250, 760, 80});
         QVERIFY(overlay);
         auto *toolbar = overlay->findChild<QFrame *>("quickToolbar");
+        for (const auto &removed : {"模糊", "全选文字", "复制文字", "复制译文", "原文、译文、对照"})
+            for (auto *action : overlay->findChildren<QAction *>())
+                QVERIFY2(action->text() != removed, qPrintable(removed));
         for (auto *button : toolbar->findChildren<QToolButton *>())
             if (button->defaultAction() && button->defaultAction()->text() != "取消任务" &&
                 (button->parentWidget()->objectName() == "quickAnnotationTools" ||
@@ -397,6 +463,19 @@ class TestQuickEdit : public QObject {
         auto *editor = windows<EditorWindow>().first();
         QCOMPARE(editor->document(), document);
         QCOMPARE(document->render(), rendered);
+        for (auto *bar : editor->findChildren<QToolBar *>())
+            if (bar->windowTitle() == "标注工具" || bar->windowTitle() == "历史与旋转")
+                QVERIFY2(!bar->styleSheet().contains("#202328"), qPrintable(bar->windowTitle()));
+        for (const auto &name : {"advancedUndo", "advancedRedo", "advancedRotate"}) {
+            auto *action = editor->findChild<QAction *>(name);
+            QVERIFY2(action, qPrintable(name));
+            QVERIFY2(!action->icon().isNull(), qPrintable(name));
+        }
+        for (const auto &removed : {"选全部文字", "复制全部文字", "复制译文", "调整译文"})
+            for (auto *action : editor->findChildren<QAction *>())
+                QVERIFY2(action->text() != removed, qPrintable(removed));
+        for (auto *combo : editor->findChildren<QComboBox *>())
+            QVERIFY(combo->currentText() != "原文" && combo->findText("对照") < 0);
         document->undo();
         QCOMPARE(document->state().annotations.size(), 1);
         document->redo();
@@ -413,6 +492,16 @@ class TestQuickEdit : public QObject {
         QCOMPARE(document->state().annotations.first().color, QColor(Qt::blue));
         QTest::keyClick(advanced, Qt::Key_Delete);
         QCOMPARE(document->state().annotations.size(), 1);
+        document->change([](auto &state) {
+            state.ocr = {{"line_0", "全部文字", {20, 20, 120, 24}, {}, .99}};
+            state.translations = {{"line_0", "全部文字", "全部译文", "简体中文", "done",
+                                   {20, 20, 120, 24}}};
+            state.translationMode = 1;
+        });
+        advanced->setTool(Tool::Ocr);
+        QTest::keyClick(advanced, Qt::Key_A, Qt::ControlModifier);
+        QTest::keyClick(advanced, Qt::Key_C, Qt::ControlModifier);
+        QCOMPARE(QApplication::clipboard()->text(), QString("全部译文"));
     }
     void translatedPng() {
         capture({20, 250, 760, 80});
@@ -517,6 +606,9 @@ int main(int argc, char **argv) {
     qputenv("QT_XCB_GL_INTEGRATION", "none");
     qputenv("QT_USE_PORTAL", "0");
     qputenv("SNAPLING_TEST_X11", "1");
+#ifdef SNAPLING_HAVE_TESSERACT
+    qputenv("SNAPLING_OCR_TEST_ENGINE", "tesseract");
+#endif
     qputenv("XDG_SESSION_TYPE", "x11");
     XInitThreads();
     QApplication app(argc, argv);

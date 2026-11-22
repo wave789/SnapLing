@@ -1,4 +1,5 @@
 #include "RapidOcr.h"
+#include <QCoreApplication>
 #include <QDir>
 #include <QFileInfo>
 #include <QFutureWatcher>
@@ -53,7 +54,49 @@ bool parseLines(const QByteArray &output, QSize imageSize, QVector<OcrLine> &lin
 } // namespace
 
 QString RapidOcr::launcher(Profile profile) {
-    return ocrModelRoot() + (profile == Profile::Paddle ? "/RapidOCR/run-paddle-ocr" : "/RapidOCR/run-ocr");
+    const auto configured = qEnvironmentVariable("SNAPLING_PADDLE_RUNTIME");
+    if (!configured.isEmpty()) {
+        const QFileInfo file(configured);
+        if (file.isFile() && file.isExecutable())
+            return file.absoluteFilePath();
+    }
+    const auto binary = QCoreApplication::applicationDirPath();
+    const QString executable = profile == Profile::Paddle ? "run-paddle-ocr" : "run-ocr";
+    const QStringList candidates{
+        binary + "/paddleocr-runtime/" + executable,
+        QDir::cleanPath(binary + "/../share/snapling/paddleocr-runtime/" + executable),
+        "/usr/share/snapling/paddleocr-runtime/" + executable,
+        QDir::homePath() + "/.local/snapling/share/snapling/paddleocr-runtime/" + executable};
+    for (const auto &path : candidates) {
+        const QFileInfo file(path);
+        if (file.isFile() && file.isExecutable())
+            return file.absoluteFilePath();
+    }
+    return QDir::cleanPath(binary + "/../share/snapling/paddleocr-runtime/" + executable);
+}
+QString RapidOcr::modelDirectory(Profile profile) {
+    if (profile == Profile::Paddle) {
+        const auto configured = qEnvironmentVariable("SNAPLING_PADDLE_MODELS");
+        const auto binary = QCoreApplication::applicationDirPath();
+        const QStringList candidates{
+            configured,
+            binary + "/../src/assets/models/PaddleOCR",
+            QDir::cleanPath(binary + "/../share/snapling/models/paddleocr"),
+            "/usr/share/snapling/models/paddleocr",
+            QDir::homePath() + "/.local/snapling/share/snapling/models/paddleocr"};
+        for (const auto &path : candidates) {
+            if (path.isEmpty())
+                continue;
+            const QDir directory(QDir::cleanPath(path));
+            if (QFileInfo(directory.filePath("det/PP-OCRv6_small_det.onnx")).isFile() &&
+                QFileInfo(directory.filePath("det/inference.yml")).isFile() &&
+                QFileInfo(directory.filePath("rec/PP-OCRv6_small_rec.onnx")).isFile() &&
+                QFileInfo(directory.filePath("rec/inference.yml")).isFile())
+                return directory.absolutePath();
+        }
+        return QDir::cleanPath(binary + "/../share/snapling/models/paddleocr");
+    }
+    return QFileInfo(launcher(profile)).dir().absoluteFilePath("models");
 }
 
 RapidOcr::RapidOcr(Profile selected, QObject *parent)
@@ -77,7 +120,7 @@ RapidOcr::RapidOcr(Profile selected, QObject *parent)
     });
     connect(&process, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
         if (error == QProcess::FailedToStart)
-            finish({}, abortReason.isEmpty() ? "无法启动 " + engineName + "，请重新运行 setup-rapidocr.py。" : abortReason);
+            finish({}, abortReason.isEmpty() ? "无法启动内置 " + engineName + "，请重新安装 SnapLing。" : abortReason);
     });
     connect(&process, &QProcess::finished, this, [this](int code, QProcess::ExitStatus status) {
         if (!abortReason.isEmpty()) {
@@ -91,7 +134,7 @@ RapidOcr::RapidOcr(Profile selected, QObject *parent)
         }
         QVector<OcrLine> lines;
         if (!parseLines(output, imageSize, lines)) {
-            finish({}, engineName + " 返回了无法读取的识别结果，请重新运行 setup-rapidocr.py。");
+            finish({}, "内置 " + engineName + " 返回了无法读取的识别结果，请重新安装 SnapLing。");
             return;
         }
         finish(std::move(lines), {});
@@ -118,7 +161,7 @@ void RapidOcr::recognize(QImage image, QString, QString, bool) {
     const auto helper = launcher(profile);
     const QFileInfo file(helper);
     if (!file.isFile() || !file.isExecutable()) {
-        emit failed(engineName + " 运行环境尚未准备。请运行 setup-rapidocr.py，或切换到 Tesseract。");
+        emit failed("未找到内置 " + engineName + " 运行环境。请使用包含 OCR 运行时的 SnapLing 安装包重新安装。");
         return;
     }
 
@@ -153,7 +196,7 @@ void RapidOcr::startProcess(const QString &helper, const QString &imagePath) {
     process.setStandardInputFile(QProcess::nullDevice());
     QStringList arguments{imagePath};
     if (profile == Profile::Paddle)
-        arguments.prepend(ocrModelRoot() + "/paddleocr");
+        arguments.prepend(modelDirectory(profile));
     process.start(helper, arguments);
 }
 

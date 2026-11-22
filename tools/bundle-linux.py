@@ -16,7 +16,7 @@ if qmake:
 qt=next((p for p in qt_candidates if (p/'platforms').is_dir()),None)
 if not qt: raise SystemExit('找不到 Qt 平台插件')
 queue=[root/'bin/snapling']
-for category in ['platforms','imageformats','platforminputcontexts','wayland-graphics-integration-client',
+for category in ['platforms','platformthemes','imageformats','platforminputcontexts','wayland-graphics-integration-client',
                  'wayland-shell-integration','wayland-decoration-client']:
     path=qt/category
     if path.exists():

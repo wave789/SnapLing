@@ -6,9 +6,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Dependencies (Qt 6.4 baseline)
-        run: sudo apt-get update && sudo apt-get install -y ninja-build pkg-config libxkbcommon-dev qt6-base-dev qt6-wayland qt6-svg-dev libtesseract-dev libpipewire-0.3-dev libx11-dev libxrandr-dev libxcb1-dev libzxing-dev xvfb xauth xdotool fonts-noto-cjk
+        run: sudo apt-get update && sudo apt-get install -y ninja-build pkg-config python3-venv python3.12-venv libxkbcommon-dev qt6-base-dev qt6-wayland qt6-gtk-platformtheme qt6-svg-dev libpipewire-0.3-dev libx11-dev libxrandr-dev libxcb1-dev libzxing-dev xvfb xauth xdotool fonts-noto-cjk
       - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
       - run: cmake --build build --parallel 4
+      - name: Bundle PaddleOCR runtime
+        run: python3 tools/prepare-paddleocr-runtime.py --output build/paddleocr-runtime
       - run: ctest --test-dir build --output-on-failure
       - name: Real X11 desktop integration
         run: tools/test-desktop.sh -o build/desktop-tests.log,txt
@@ -35,7 +37,7 @@ jobs:
         run: vcpkg install tesseract:x64-windows
       - name: Configure
         shell: pwsh
-        run: cmake -S . -B build -A x64 -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+        run: cmake -S . -B build -A x64 -DSNAPLING_TESSERACT=ON -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
       - run: cmake --build build --config Release --parallel 4
       - name: Tests
         shell: pwsh

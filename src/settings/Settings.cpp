@@ -13,13 +13,25 @@ Settings::Settings(QString file)
                 : file,
             QSettings::IniFormat) {
     QDir().mkpath(QFileInfo(store.fileName()).absolutePath());
-    if (store.value("schemaVersion", 0).toInt() < 1) {
-        store.setValue("schemaVersion", 1);
+    const int schema = store.value("schemaVersion", 0).toInt();
+    if (schema < 2) {
+        const auto desktops = qEnvironmentVariable("XDG_CURRENT_DESKTOP").split(':', Qt::SkipEmptyParts);
+        const bool gnomeWayland =
+            (desktops.contains("GNOME", Qt::CaseInsensitive) ||
+             qEnvironmentVariable("XDG_SESSION_DESKTOP").startsWith("gnome", Qt::CaseInsensitive) ||
+             qEnvironmentVariable("XDG_SESSION_DESKTOP").startsWith("ubuntu", Qt::CaseInsensitive)) &&
+            qEnvironmentVariable("XDG_SESSION_TYPE") == "wayland";
+        if (gnomeWayland && store.value("capture/waylandMethod").toString() == "screenshot")
+            store.setValue("capture/waylandMethod", "compositor");
+        store.setValue("schemaVersion", 2);
         store.sync();
     }
 }
 QVariant Settings::value(QString key, QVariant fallback) const {
     return store.value(key, fallback);
+}
+bool Settings::contains(QString key) const {
+    return store.contains(key);
 }
 void Settings::set(QString key, QVariant v) {
     store.setValue(key, v);

@@ -1,6 +1,7 @@
 #include "AnnotationTools.h"
 #include "Canvas.h"
 #include "ui/ToolIcons.h"
+#include <QApplication>
 #include <QActionGroup>
 #include <QColorDialog>
 #include <QDoubleSpinBox>
@@ -12,8 +13,8 @@
 #include <tuple>
 
 namespace SnapLing {
-static void addProperties(QToolBar *toolbar, Canvas *canvas) {
-    QObject::connect(toolbar->addAction(toolIcon(ToolIcon::Style), "颜色"), &QAction::triggered, canvas, [canvas] {
+static void addProperties(QToolBar *toolbar, Canvas *canvas, bool dark) {
+    QObject::connect(toolbar->addAction(toolIcon(ToolIcon::Style, dark), "颜色"), &QAction::triggered, canvas, [canvas] {
         const auto color = QColorDialog::getColor(canvas->color(), canvas);
         if (color.isValid())
             canvas->setColor(color);
@@ -25,7 +26,7 @@ static void addProperties(QToolBar *toolbar, Canvas *canvas) {
     width->setAccessibleName("线宽");
     toolbar->addWidget(width);
     QObject::connect(width, qOverload<int>(&QSpinBox::valueChanged), canvas, &Canvas::setWidth);
-    QObject::connect(toolbar->addAction(toolIcon(ToolIcon::Text), "字体"), &QAction::triggered, canvas, [canvas] {
+    QObject::connect(toolbar->addAction(toolIcon(ToolIcon::Text, dark), "字体"), &QAction::triggered, canvas, [canvas] {
         bool accepted;
         auto font = QFontDialog::getFont(&accepted, QFont(), canvas);
         if (accepted) {
@@ -42,23 +43,23 @@ static void addProperties(QToolBar *toolbar, Canvas *canvas) {
     opacity->setAccessibleName("透明度");
     toolbar->addWidget(opacity);
     QObject::connect(opacity, qOverload<double>(&QDoubleSpinBox::valueChanged), canvas, &Canvas::setOpacity);
-    configureIconToolbar(toolbar);
+    configureIconToolbar(toolbar, dark);
 }
 void addAnnotationTools(QToolBar *toolbar, Canvas *canvas, bool advanced, bool compact) {
+    const bool dark = compact || QApplication::palette().color(QPalette::Window).lightness() < 128;
     auto *group = new QActionGroup(toolbar);
     QList<std::tuple<QString, Tool, ToolIcon>> tools{
         {"选择", Tool::Select, ToolIcon::Select}, {"矩形", Tool::Rectangle, ToolIcon::Rectangle},
         {"椭圆", Tool::Ellipse, ToolIcon::Ellipse}, {"直线", Tool::Line, ToolIcon::Line},
         {"箭头", Tool::Arrow, ToolIcon::Arrow}, {"画笔", Tool::Pen, ToolIcon::Pen},
         {"荧光", Tool::Highlighter, ToolIcon::Highlighter}, {"文字", Tool::Text, ToolIcon::Text},
-        {"序号", Tool::Number, ToolIcon::Number}, {"马赛克", Tool::Mosaic, ToolIcon::Mosaic},
-        {"模糊", Tool::Blur, ToolIcon::Blur}};
+        {"序号", Tool::Number, ToolIcon::Number}, {"马赛克", Tool::Mosaic, ToolIcon::Mosaic}};
     if (advanced) {
         tools.append({"裁剪", Tool::Crop, ToolIcon::Crop});
         tools.append({"取色", Tool::Picker, ToolIcon::Picker});
     }
     for (const auto &[name, tool, icon] : tools) {
-        auto *action = toolbar->addAction(toolIcon(icon), name);
+        auto *action = toolbar->addAction(toolIcon(icon, dark), name);
         action->setCheckable(true);
         action->setChecked(tool == Tool::Select);
         action->setData(int(tool));
@@ -78,17 +79,17 @@ void addAnnotationTools(QToolBar *toolbar, Canvas *canvas, bool advanced, bool c
     if (compact) {
         auto *menu = new QMenu(toolbar);
         auto *properties = new QToolBar(menu);
-        addProperties(properties, canvas);
+        addProperties(properties, canvas, true);
         auto *content = new QWidgetAction(menu);
         content->setDefaultWidget(properties);
         menu->addAction(content);
-        auto *style = toolbar->addAction(toolIcon(ToolIcon::Style), "颜色、线宽与字体");
+        auto *style = toolbar->addAction(toolIcon(ToolIcon::Style, true), "颜色、线宽与字体");
         QObject::connect(style, &QAction::triggered, toolbar, [toolbar, style, menu] {
             const auto *button = toolbar->widgetForAction(style);
             menu->popup(button->mapToGlobal(QPoint(0, button->height() + 4)));
         });
     } else
-        addProperties(toolbar, canvas);
-    configureIconToolbar(toolbar);
+        addProperties(toolbar, canvas, dark);
+    configureIconToolbar(toolbar, dark);
 }
 } // namespace SnapLing

@@ -1,4 +1,5 @@
 #include "ToolIcons.h"
+#include <QApplication>
 #include <QPainter>
 #include <QPainterPath>
 #include <QToolBar>
@@ -80,6 +81,11 @@ static void drawIcon(QPainter &p, ToolIcon icon) {
         QPainterPath path; path.moveTo(5, 9); path.cubicTo(18, 5, 23, 18, 13, 20); p.drawPath(path);
         p.drawPolyline(QPolygonF{{9, 4}, {5, 9}, {11, 12}}); break;
     }
+    case ToolIcon::Rotate:
+        p.drawRoundedRect(QRectF(5, 5, 14, 14), 2, 2);
+        p.drawArc(QRectF(2, 2, 20, 20), 38 * 16, 280 * 16);
+        p.drawPolyline(QPolygonF{{18, 2}, {22, 5}, {19, 9}});
+        break;
     case ToolIcon::View:
         p.drawRoundedRect(QRectF(3, 5, 18, 14), 2, 2); line(12, 5, 12, 19);
         p.drawEllipse(QPointF(7.5, 12), 1.8, 1.8); line(15, 10, 18, 10); line(15, 14, 18, 14); break;
@@ -89,8 +95,12 @@ static void drawIcon(QPainter &p, ToolIcon icon) {
     }
 }
 QIcon toolIcon(ToolIcon icon) {
+    return toolIcon(icon, QApplication::palette().color(QPalette::Window).lightness() < 128);
+}
+QIcon toolIcon(ToolIcon icon, bool dark) {
     static QHash<int, QIcon> cache;
-    const auto found = cache.constFind(int(icon));
+    const int key = (int(icon) << 1) | int(dark);
+    const auto found = cache.constFind(key);
     if (found != cache.cend())
         return found.value();
     QIcon result;
@@ -102,34 +112,42 @@ QIcon toolIcon(ToolIcon icon) {
                 QPainter painter(&pixels);
                 painter.setRenderHint(QPainter::Antialiasing);
                 painter.scale(size / 24., size / 24.);
-                QColor color = mode == QIcon::Disabled ? QColor("#5d646e") : QColor("#bec5cf");
-                if (mode == QIcon::Active) color = QColor("#f3f6fa");
-                if (state == QIcon::On || icon == ToolIcon::Confirm) color = QColor("#0bd18b");
+                QColor color = dark
+                                   ? (mode == QIcon::Disabled ? QColor("#5d646e") : QColor("#bec5cf"))
+                                   : (mode == QIcon::Disabled ? QColor("#9ca3af") : QColor("#4b5563"));
+                if (mode == QIcon::Active)
+                    color = dark ? QColor("#f3f6fa") : QColor("#111827");
+                if (state == QIcon::On || icon == ToolIcon::Confirm)
+                    color = dark ? QColor("#0bd18b") : QColor("#059669");
                 if (state == QIcon::On && icon == ToolIcon::Translate) color = Qt::white;
-                if (icon == ToolIcon::Cancel) color = QColor("#ff6675");
+                if (icon == ToolIcon::Cancel)
+                    color = dark ? QColor("#ff6675") : QColor("#dc2626");
                 painter.setPen(QPen(color, 1.65, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
                 painter.setBrush(Qt::NoBrush);
                 drawIcon(painter, icon);
                 painter.end();
                 result.addPixmap(pixels, mode, state);
             }
-    cache.insert(int(icon), result);
+    cache.insert(key, result);
     return result;
 }
-void configureIconToolbar(QToolBar *toolbar) {
+void configureIconToolbar(QToolBar *toolbar, bool dark) {
     toolbar->setMovable(false);
     toolbar->setFloatable(false);
     toolbar->setIconSize({20, 20});
     toolbar->setToolButtonStyle(Qt::ToolButtonIconOnly);
-    toolbar->setStyleSheet(
-        "QToolBar{background:#202328;border:0;spacing:1px;padding:0}"
-        "QToolButton{background:transparent;border:1px solid transparent;border-radius:5px;padding:5px;color:#d3d9e1}"
-        "QToolButton:hover{background:#343a43}"
-        "QToolButton:checked{background:#153e32;border-color:#24604b}"
-        "QToolButton[translationActive=\"true\"]{background:#08b783;border-color:#08b783}"
-        "QToolButton[translationActive=\"true\"]:hover{background:#09c58d}"
-        "QToolBar::separator{background:#454b54;width:1px;margin:7px 4px}"
-        "QSpinBox,QDoubleSpinBox{background:#2c323b;color:#d3d9e1;border:1px solid #49525e;padding:3px}");
+    if (dark)
+        toolbar->setStyleSheet(
+            "QToolBar{background:#202328;border:0;spacing:1px;padding:0}"
+            "QToolButton{background:transparent;border:1px solid transparent;border-radius:5px;padding:5px;color:#d3d9e1}"
+            "QToolButton:hover{background:#343a43}"
+            "QToolButton:checked{background:#153e32;border-color:#24604b}"
+            "QToolButton[translationActive=\"true\"]{background:#08b783;border-color:#08b783}"
+            "QToolButton[translationActive=\"true\"]:hover{background:#09c58d}"
+            "QToolBar::separator{background:#454b54;width:1px;margin:7px 4px}"
+            "QSpinBox,QDoubleSpinBox{background:#2c323b;color:#d3d9e1;border:1px solid #49525e;padding:3px}");
+    else
+        toolbar->setStyleSheet({});
     for (auto *action : toolbar->actions())
         if (auto *button = qobject_cast<QToolButton *>(toolbar->widgetForAction(action))) {
             button->setAccessibleName(action->text());

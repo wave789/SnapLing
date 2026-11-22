@@ -9,8 +9,7 @@
 #include <QDesktopServices>
 #include <QFileDialog>
 #include <QFutureWatcher>
-#include <QInputDialog>
-#include <QLabel>
+#include <QHash>
 #include <QMessageBox>
 #include <QRegularExpression>
 #include <QSaveFile>
@@ -40,6 +39,34 @@ EditorWindow::EditorWindow(std::shared_ptr<EditorSession> session)
     tools->setMovable(false);
     addAnnotationTools(tools, canvas, true);
     addToolBarBreak();
+    auto *history = addToolBar("历史与旋转");
+    history->setMovable(false);
+    auto historyAction = [&](QString name, ToolIcon icon, auto fn, QKeySequence shortcut = {}) {
+        auto *a = history->addAction(toolIcon(icon), name);
+        a->setToolTip(shortcut.isEmpty()
+                          ? name
+                          : name + " (" + shortcut.toString(QKeySequence::NativeText) + ")");
+        connect(a, &QAction::triggered, this, fn);
+        if (!shortcut.isEmpty())
+            a->setShortcut(shortcut);
+        return a;
+    };
+    auto *undo = historyAction("撤销", ToolIcon::Undo, [this] { doc.undo(); }, QKeySequence::Undo);
+    auto *redo = historyAction("重做", ToolIcon::Redo, [this] { doc.redo(); },
+                               QKeySequence("Ctrl+Shift+Z"));
+    auto *rotate = historyAction(
+        "旋转", ToolIcon::Rotate,
+        [this] { doc.change([](auto &s) { s.rotation = (s.rotation + 90) % 360; }); });
+    undo->setObjectName("advancedUndo");
+    redo->setObjectName("advancedRedo");
+    rotate->setObjectName("advancedRotate");
+    configureIconToolbar(history);
+    connect(&doc, &Document::changed, this, [this, undo, redo] {
+        undo->setEnabled(doc.canUndo());
+        redo->setEnabled(doc.canRedo());
+    });
+    undo->setEnabled(doc.canUndo());
+    redo->setEnabled(doc.canRedo());
     auto *actions = addToolBar("截图操作");
     actions->setMovable(false);
     auto action = [&](QString name, auto fn, QKeySequence shortcut = {}) {
@@ -49,27 +76,11 @@ EditorWindow::EditorWindow(std::shared_ptr<EditorSession> session)
             a->setShortcut(shortcut);
         return a;
     };
-    auto *undo = action(
-             "撤销", [this] { doc.undo(); }, QKeySequence::Undo),
-         *redo = action("重做", [this] { doc.redo(); }, QKeySequence("Ctrl+Shift+Z"));
-    connect(&doc, &Document::changed, this, [this, undo, redo] {
-        undo->setEnabled(doc.canUndo());
-        redo->setEnabled(doc.canRedo());
-    });
-    undo->setEnabled(doc.canUndo());
-    redo->setEnabled(doc.canRedo());
-    action("旋转", [this] { doc.change([](auto &s) { s.rotation = (s.rotation + 90) % 360; }); });
     action("恢复裁剪", [this] { doc.change([this](auto &s) { s.crop = doc.original().rect(); }); });
     action("水平翻转", [this] { doc.change([](auto &s) { s.flipH = !s.flipH; }); });
     action("垂直翻转", [this] { doc.change([](auto &s) { s.flipV = !s.flipV; }); });
     actions->addSeparator();
     action("OCR", [this] { runOcr(); }, QKeySequence("Ctrl+Shift+O"));
-    action("选全部文字", [this] { canvas->selectAllText(); });
-    action("复制全部文字", [this] {
-        TextLayout l;
-        l.setLines(doc.state().ocr);
-        QApplication::clipboard()->setText(l.all());
-    });
     action("导出文字", [this] { exportText(); });
     auto *translation = action("原地翻译", [this] { translate(); });
     translation->setIcon(toolIcon(ToolIcon::Translate));
@@ -92,33 +103,6 @@ EditorWindow::EditorWindow(std::shared_ptr<EditorSession> session)
         updateTranslation(editing->isTranslationEnabled());
     });
     updateTranslation(editing->isTranslationEnabled());
-    action("调整译文", [this] { editTranslation(); });
-    auto *mode = new QComboBox;
-    mode->addItems({"原文", "译文", "对照"});
-    mode->setCurrentIndex(doc.state().translationMode);
-    actions->addWidget(mode);
-    comparison = new QDockWidget("原始截图", this);
-    auto *original = new QLabel;
-    original->setAlignment(Qt::AlignCenter);
-    original->setPixmap(
-        QPixmap::fromImage(doc.original().scaled(560, 700, Qt::KeepAspectRatio, Qt::SmoothTransformation)));
-    comparison->setWidget(original);
-    addDockWidget(Qt::RightDockWidgetArea, comparison);
-    comparison->setVisible(doc.state().translationMode == 2);
-    connect(&doc, &Document::changed, this, [this, original, mode] {
-        mode->setCurrentIndex(doc.state().translationMode);
-        comparison->setVisible(doc.state().translationMode == 2);
-        auto key = doc.original().cacheKey();
-        if (original->property("sourceKey").toLongLong() != key) {
-            original->setPixmap(QPixmap::fromImage(
-                doc.original().scaled(560, 700, Qt::KeepAspectRatio, Qt::SmoothTransformation)));
-            original->setProperty("sourceKey", key);
-        }
-    });
-    connect(mode, qOverload<int>(&QComboBox::activated), this, [this](int i) {
-        doc.change([i](auto &s) { s.translationMode = i; });
-        comparison->setVisible(i == 2);
-    });
     auto *panel = new QComboBox;
     panel->addItems({"自动背景", "纯色底板"});
     actions->addWidget(panel);
@@ -137,7 +121,8 @@ EditorWindow::EditorWindow(std::shared_ptr<EditorSession> session)
         a->setShortcut(shortcut);
         return a;
     };
-    outputAction("复制", [this] { copy(); }, QKeySequence::Copy);
+    auto *copyAction = outputAction("复制", [this] { copy(); }, QKeySequence::Copy);
+    copyAction->setToolTip("Ctrl+C：复制所选文字；没有文字选区时复制图片");
     outputAction("保存图片", [this] { saveImage(); }, QKeySequence::Save);
     outputAction("保存工程", [this] { saveProject(); }, QKeySequence("Ctrl+Shift+S"));
     outputAction("复制文件路径", [this] {
@@ -145,13 +130,6 @@ EditorWindow::EditorWindow(std::shared_ptr<EditorSession> session)
             saveImage();
         if (!savedPath.isEmpty())
             QApplication::clipboard()->setText(savedPath);
-    });
-    outputAction("复制译文", [this] {
-        QStringList texts;
-        for (auto u : doc.state().translations)
-            if (u.status == "done")
-                texts << u.target;
-        QApplication::clipboard()->setText(texts.join('\n'));
     });
     outputAction("贴图", [this] { new PinWindow(doc.render()); });
     outputAction("二维码", [this] {
@@ -187,7 +165,7 @@ EditorWindow::EditorWindow(std::shared_ptr<EditorSession> session)
         QTimer::singleShot(0, this, [this] { requestTranslationApproval(editing->translationEndpoint()); });
     savedPath = editing->savedPath();
     statusBar()->showMessage(editing->message().isEmpty()
-        ? "双击文字可修改；选择工具可移动/删除标注；滚轮缩放。OCR 中 Ctrl+C 优先复制所选文字。"
+        ? "双击文字可修改；选择工具可移动/删除标注；滚轮缩放。Ctrl+A 全选文字，Ctrl+C 复制文字或图片。"
         : editing->message());
 }
 EditorWindow::~EditorWindow() {
@@ -217,10 +195,23 @@ void EditorWindow::translate() {
     editing->toggleTranslation(canvas->selectedLines());
 }
 void EditorWindow::copy() {
-    if (!canvas->selectedText().isEmpty())
-        QApplication::clipboard()->setText(canvas->selectedText());
-    else
+    const auto selected = canvas->selectedLines();
+    if (selected.isEmpty()) {
         editing->copyImage();
+    } else if (editing->isTranslationEnabled()) {
+        QHash<QString, QString> translated;
+        for (const auto &unit : doc.state().translations)
+            if (unit.status == "done")
+                translated.insert(unit.id, unit.target);
+        QStringList text;
+        for (const auto &line : selected)
+            if (translated.contains(line.id))
+                text << translated.value(line.id);
+        QApplication::clipboard()->setText(
+            text.isEmpty() ? canvas->selectedText() : text.join('\n'));
+    } else {
+        QApplication::clipboard()->setText(canvas->selectedText());
+    }
     statusBar()->showMessage("已复制", 3000);
     if (settings.value("general/closeAfterCopy", false).toBool())
         close();
@@ -302,32 +293,5 @@ void EditorWindow::sensitive() {
             s.annotations << a;
         }
     });
-}
-void EditorWindow::editTranslation() {
-    auto units = doc.state().translations;
-    if (units.isEmpty())
-        return;
-    QStringList choices;
-    for (auto &u : units)
-        choices << u.id + " · " + u.target.left(40);
-    bool ok;
-    auto choice = QInputDialog::getItem(this, "调整译文", "选择文字块", choices, 0, false, &ok);
-    if (!ok)
-        return;
-    int index = choices.indexOf(choice);
-    auto text = QInputDialog::getMultiLineText(this, "修改译文", "完整译文", units[index].target, &ok);
-    if (!ok)
-        return;
-    units[index].target = text;
-    int size = QInputDialog::getInt(this, "译文字号", "0 表示自动；无法容纳时可扩展区域",
-                                    units[index].fontSize, 0, 96, 1, &ok);
-    if (!ok)
-        return;
-    units[index].fontSize = size;
-    int height = QInputDialog::getInt(this, "译文区域", "区域高度（像素）", qRound(units[index].box.height()),
-                                      8, doc.original().height(), 1, &ok);
-    if (ok)
-        units[index].box.setHeight(height);
-    doc.change([units](auto &s) { s.translations = units; });
 }
 } // namespace SnapLing

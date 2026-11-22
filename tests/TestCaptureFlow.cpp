@@ -219,6 +219,7 @@ class CompositorSelector : public QObject, protected QDBusContext {
     QDBusMessage pending;
     int requests = 0, cancellations = 0;
   public slots:
+    uint GetVersion() { return 3; }
     void SelectRegion() {
         setDelayedReply(true);
         pending = message();
@@ -486,6 +487,8 @@ class TestCaptureFlow : public QObject {
                 QTest::mousePress(overlay, Qt::LeftButton, Qt::NoModifier, {25, 40});
                 QVERIFY(!overlay->canvasWidget());
                 QTest::mouseRelease(overlay, Qt::LeftButton, Qt::NoModifier, {150, 190});
+                QTRY_VERIFY(overlay->isSelectionReady());
+                QTest::keyClick(overlay, Qt::Key_Return);
                 quickReady = true;
             }
         }
@@ -654,6 +657,8 @@ class TestCaptureFlow : public QObject {
         QVERIFY(external);
         QTest::mousePress(external, Qt::LeftButton, Qt::NoModifier, {40, 40});
         QTest::mouseRelease(external, Qt::LeftButton, Qt::NoModifier, {240, 180});
+        QTRY_VERIFY(external->isSelectionReady());
+        QTest::keyClick(external, Qt::Key_Return);
         QTRY_COMPARE(windows<SelectionOverlay>().size(), 1);
         QCOMPARE(external->phase(), SelectionOverlay::Phase::QuickEditing);
         auto session = external->session();
@@ -1325,11 +1330,13 @@ class TestCaptureFlow : public QObject {
                       {"external-left", {-800, -180, 800, 600}, {}, 2}};
         const auto &target = testLayout.last();
         const QRect region(128, 95, 292, 176);
-        QImage crop(region.size() * target.devicePixelRatio, QImage::Format_RGB32);
-        crop.fill(QColor("#2458d8"));
-        crop.setPixelColor(3, 7, Qt::magenta);
+        QImage monitorPixels(target.desktop.size().toSize() * target.devicePixelRatio, QImage::Format_RGB32);
+        monitorPixels.fill(QColor("#2458d8"));
+        const auto cropOrigin = QPoint(qRound(region.x() * target.devicePixelRatio),
+                                       qRound(region.y() * target.devicePixelRatio));
+        monitorPixels.setPixelColor(cropOrigin + QPoint(3, 7), Qt::magenta);
         const auto path = images.filePath("compositor.png");
-        QVERIFY(crop.save(path));
+        QVERIFY(monitorPixels.save(path));
         QFile pixels(path);
         QVERIFY(pixels.open(QIODevice::ReadOnly));
 
@@ -1353,18 +1360,26 @@ class TestCaptureFlow : public QObject {
         QCOMPARE(frame.desktop, target.desktop);
         QCOMPARE(frame.selectionViewport, QRectF(region));
         QVERIFY(frame.selectionComplete);
+        QVERIFY(frame.fullMonitorImage);
+        QCOMPARE(frame.image.size(), monitorPixels.size());
 
-        // 合成器收到鼠标松开后发送结果。Qt 收到后就进入即时编辑，不再要求框选或按 Enter。
+        // 合成器返回整屏和初始选区；Qt 先显示可移动、可缩放的选择框。
         QTRY_COMPARE(windows<SelectionOverlay>().size(), 1);
         auto *overlay = windows<SelectionOverlay>().first();
+        QTRY_VERIFY(overlay->isSelectionReady());
+        QCOMPARE(overlay->selectionWidgetRect(), region);
+        QTest::keyClick(overlay, Qt::Key_Return);
         QCOMPARE(overlay->phase(), SelectionOverlay::Phase::QuickEditing);
         auto *toolbar = overlay->findChild<QFrame *>("quickToolbar");
         QVERIFY(toolbar && toolbar->isVisible());
         QCOMPARE(toolbar->parentWidget(), overlay);
         QVERIFY(overlay->canvasWidget());
         QCOMPARE(overlay->canvasWidget()->geometry(), region);
-        QCOMPARE(overlay->session()->document.original().size(), crop.size());
+        QCOMPARE(overlay->session()->document.original().size(), region.size() * target.devicePixelRatio);
         QCOMPARE(overlay->session()->document.original().pixelColor(3, 7), Qt::magenta);
+        auto *border = overlay->findChild<QFrame *>("selectionGreenBorder");
+        QVERIFY(border && border->isVisible());
+        QCOMPARE(border->geometry(), region.adjusted(1, 1, -1, -1));
         QVERIFY(windows<EditorWindow>().isEmpty());
         QVERIFY(screenshot.requests.isEmpty());
         QCOMPARE(screenCast.created, 0);
@@ -1428,9 +1443,12 @@ class TestCaptureFlow : public QObject {
             QVERIFY(!overlay->canvasWidget());
             QTest::mousePress(overlay, Qt::LeftButton, Qt::NoModifier, {50, 50});
             QTest::mouseRelease(overlay, Qt::LeftButton, Qt::NoModifier, drag ? QPoint(200, 170) : QPoint(50, 50));
+            QTRY_VERIFY(overlay->isSelectionReady());
+            QTest::keyClick(overlay, Qt::Key_Return);
             QTRY_COMPARE(overlay->phase(), SelectionOverlay::Phase::QuickEditing);
             QCOMPARE(overlay->session()->document.original().size(), drag ? QSize(150, 120) : image.size());
             QVERIFY(overlay->findChild<QFrame *>("quickToolbar")->isVisible());
+            QVERIFY(overlay->findChild<QFrame *>("selectionGreenBorder")->isVisible());
             QVERIFY(windows<EditorWindow>().isEmpty());
             QTest::keyClick(overlay->canvasWidget(), Qt::Key_Escape);
             QTRY_VERIFY(windows<SelectionOverlay>().isEmpty());
@@ -1516,6 +1534,8 @@ class TestCaptureFlow : public QObject {
         } else
             QTest::mouseClick(overlay, Qt::LeftButton, Qt::NoModifier, {80, 80});
         QTRY_COMPARE(windows<SelectionOverlay>().size(), 1);
+        QTRY_VERIFY(overlay->isSelectionReady());
+        QTest::keyClick(overlay, Qt::Key_Return);
         QTRY_COMPARE(overlay->phase(), SelectionOverlay::Phase::QuickEditing);
         QVERIFY(overlay->findChild<QFrame *>("quickToolbar")->isVisible());
         QCOMPARE(overlay->session()->document.original().size(), atlas.pixelRect(testLayout.last().desktop).size());
@@ -1538,6 +1558,8 @@ class TestCaptureFlow : public QObject {
             QVERIFY(native({"mousemove", "--window", nativeWindows.last(), "300", "250"}));
             QTRY_COMPARE(overlay->selection().size(), QSizeF(220, 170));
             QVERIFY(native({"mouseup", "1"}));
+            QTRY_VERIFY(overlay->isSelectionReady());
+            QTest::keyClick(overlay, Qt::Key_Return);
             QTRY_COMPARE(overlay->phase(), SelectionOverlay::Phase::QuickEditing);
             QCOMPARE(overlay->session()->document.original().size(), QSize(220, 170));
             QVERIFY(overlay->findChild<QFrame *>("quickToolbar")->isVisible());

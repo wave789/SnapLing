@@ -9,7 +9,9 @@ bool CaptureFrame::hasSelectionViewport() const {
            QRectF(QPointF(), desktop.size()).contains(selectionViewport);
 }
 QPointF CaptureFrame::toPixel(QPointF p) const {
-    const auto bounds = hasSelectionViewport() ? selectionViewport.translated(desktop.topLeft()) : desktop;
+    const auto bounds = fullMonitorImage || !hasSelectionViewport()
+                            ? desktop
+                            : selectionViewport.translated(desktop.topLeft());
     if (bounds.isEmpty())
         return {};
     return {(p.x() - bounds.x()) * image.width() / bounds.width(),

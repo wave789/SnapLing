@@ -7,6 +7,7 @@
 #include <QClipboard>
 #include <QCloseEvent>
 #include <QFrame>
+#include <QHash>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPushButton>
@@ -42,7 +43,8 @@ QImage maskedSelection(const QImage &source, const QPainterPath &path) {
 }
 SelectionOverlay::SelectionOverlay(CaptureFrame f, CaptureMode m, QWidget *parent,
                                    std::shared_ptr<EditorSession> session, QString activationToken, bool activate)
-    : QWidget(parent), frame(std::move(f)), anchoredSelection(frame.hasSelectionViewport()), mode(m),
+    : QWidget(parent), frame(std::move(f)),
+      anchoredSelection(frame.hasSelectionViewport() && !frame.fullMonitorImage), mode(m),
       editing(std::move(session)) {
     setAttribute(Qt::WA_DeleteOnClose);
     setWindowTitle("SnapLing · 即时截图编辑");
@@ -52,6 +54,9 @@ SelectionOverlay::SelectionOverlay(CaptureFrame f, CaptureMode m, QWidget *paren
         setAttribute(Qt::WA_ShowWithoutActivating);
     if (anchoredSelection)
         setAttribute(Qt::WA_TranslucentBackground);
+    else
+        setAttribute(Qt::WA_OpaquePaintEvent);
+    setAttribute(Qt::WA_StaticContents);
     setMouseTracking(true);
     setCursor(Qt::CrossCursor);
     setFocusPolicy(Qt::StrongFocus);
@@ -75,9 +80,23 @@ SelectionOverlay::SelectionOverlay(CaptureFrame f, CaptureMode m, QWidget *paren
     if (anchoredSelection) {
         selected = frame.image.rect();
         beginQuickEditing();
+    } else if (frame.fullMonitorImage) {
+        const auto globalViewport = frame.selectionViewport.translated(frame.desktop.topLeft());
+        selected = QRectF(frame.toPixel(globalViewport.topLeft()),
+                          frame.toPixel(globalViewport.bottomRight()))
+                       .normalized()
+                       .intersected(frame.image.rect());
+        selectionReady = !selected.isEmpty();
+        if (selectionReady)
+            QTimer::singleShot(0, this, [this] {
+                if (selectionReady && currentPhase == Phase::Selecting) {
+                    finishSelection();
+                }
+            });
     }
     present(std::move(activationToken), activate);
-    if (!anchoredSelection && (mode == CaptureMode::FullScreen || frame.selectionComplete)) {
+    if (!anchoredSelection && !frame.fullMonitorImage &&
+        (mode == CaptureMode::FullScreen || frame.selectionComplete)) {
         selected = frame.image.rect();
         QTimer::singleShot(0, this, &SelectionOverlay::beginQuickEditing);
     }
@@ -112,7 +131,7 @@ void SelectionOverlay::present(QString token, bool activate) {
     }
 }
 void SelectionOverlay::enterEvent(QEnterEvent *) {
-    if (currentPhase == Phase::Selecting && !dragging &&
+    if (currentPhase == Phase::Selecting && !selectionReady && !dragging &&
         (mode == CaptureMode::Region || (mode == CaptureMode::Window && frame.windows.isEmpty()))) {
         selected = frame.image.rect();
         hoverSelection = true;
@@ -120,7 +139,7 @@ void SelectionOverlay::enterEvent(QEnterEvent *) {
     }
 }
 void SelectionOverlay::leaveEvent(QEvent *) {
-    if (currentPhase == Phase::Selecting && hoverSelection && !dragging) {
+    if (currentPhase == Phase::Selecting && !selectionReady && hoverSelection && !dragging) {
         selected = {};
         hoverSelection = false;
         cursor = {};
@@ -139,6 +158,8 @@ SelectionOverlay::~SelectionOverlay() {
     }
 }
 QRectF SelectionOverlay::imageViewport() const {
+    if (frame.fullMonitorImage)
+        return rect();
     if (anchoredSelection) {
         // On Mutter's physical layout, fullscreen surface geometry can be smaller than the stage coordinates.
         const qreal sx = width() / frame.desktop.width();
@@ -162,6 +183,67 @@ QRect SelectionOverlay::selectionGeometry() const {
                   selected.width() * viewport.width() / frame.image.width(),
                   selected.height() * viewport.height() / frame.image.height()).toAlignedRect();
 }
+QRect SelectionOverlay::loupeGeometry(QPointF point) const {
+    return {qBound(0, int(point.x() + 24), qMax(0, width() - 145)),
+            qBound(0, int(point.y() + 30), qMax(0, height() - 150)), 136, 136};
+}
+SelectionOverlay::ResizeHandle SelectionOverlay::handleAt(QPointF point) const {
+    if (selected.isEmpty())
+        return ResizeHandle::None;
+    constexpr qreal tolerance = 10;
+    const auto area = QRectF(selectionGeometry());
+    const bool left = qAbs(point.x() - area.left()) <= tolerance;
+    const bool right = qAbs(point.x() - area.right()) <= tolerance;
+    const bool top = qAbs(point.y() - area.top()) <= tolerance;
+    const bool bottom = qAbs(point.y() - area.bottom()) <= tolerance;
+    const bool withinX = point.x() >= area.left() - tolerance && point.x() <= area.right() + tolerance;
+    const bool withinY = point.y() >= area.top() - tolerance && point.y() <= area.bottom() + tolerance;
+    if (!withinX || !withinY)
+        return ResizeHandle::None;
+    if (left && top)
+        return ResizeHandle::TopLeft;
+    if (right && top)
+        return ResizeHandle::TopRight;
+    if (left && bottom)
+        return ResizeHandle::BottomLeft;
+    if (right && bottom)
+        return ResizeHandle::BottomRight;
+    if (left)
+        return ResizeHandle::Left;
+    if (right)
+        return ResizeHandle::Right;
+    if (top)
+        return ResizeHandle::Top;
+    if (bottom)
+        return ResizeHandle::Bottom;
+    return area.contains(point) ? ResizeHandle::Move : ResizeHandle::None;
+}
+void SelectionOverlay::updateCursor(ResizeHandle handle) {
+    switch (handle) {
+    case ResizeHandle::Move:
+        setCursor(Qt::SizeAllCursor);
+        break;
+    case ResizeHandle::Left:
+    case ResizeHandle::Right:
+        setCursor(Qt::SizeHorCursor);
+        break;
+    case ResizeHandle::Top:
+    case ResizeHandle::Bottom:
+        setCursor(Qt::SizeVerCursor);
+        break;
+    case ResizeHandle::TopLeft:
+    case ResizeHandle::BottomRight:
+        setCursor(Qt::SizeFDiagCursor);
+        break;
+    case ResizeHandle::TopRight:
+    case ResizeHandle::BottomLeft:
+        setCursor(Qt::SizeBDiagCursor);
+        break;
+    case ResizeHandle::None:
+        setCursor(Qt::CrossCursor);
+        break;
+    }
+}
 QPointF SelectionOverlay::imagePoint(QPointF point) const {
     const auto viewport = imageViewport();
     return {qBound(0., (point.x() - viewport.x()) * frame.image.width() / viewport.width(), double(frame.image.width())),
@@ -181,20 +263,34 @@ QPainterPath SelectionOverlay::path() const {
 void SelectionOverlay::paintEvent(QPaintEvent *) {
     QPainter painter(this);
     const auto viewport = imageViewport();
+    const qreal dpr = devicePixelRatioF();
+    const auto pixelSize = (viewport.size() * dpr).toSize();
+    if (!pixelSize.isEmpty() &&
+        (displayPixmap.isNull() || displayPixmapSize != pixelSize ||
+         displayPixmapSource != frame.image.cacheKey())) {
+        auto scaled = frame.image.scaled(pixelSize, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+        scaled.setDevicePixelRatio(dpr);
+        displayPixmap = QPixmap::fromImage(std::move(scaled));
+        displayPixmap.setDevicePixelRatio(dpr);
+        displayPixmapSize = pixelSize;
+        displayPixmapSource = frame.image.cacheKey();
+    }
     if (anchoredSelection) {
         painter.setCompositionMode(QPainter::CompositionMode_Source);
         painter.fillRect(rect(), QColor(0, 0, 0, 115));
-        painter.drawImage(viewport, frame.image);
+        painter.drawPixmap(viewport.topLeft(), displayPixmap);
         painter.setCompositionMode(QPainter::CompositionMode_SourceOver);
     } else {
         painter.fillRect(rect(), QColor("#151b25"));
-        painter.drawImage(viewport, frame.image);
+        painter.drawPixmap(viewport.topLeft(), displayPixmap);
         painter.fillRect(rect(), QColor(0, 0, 0, 115));
         painter.save();
-        painter.translate(viewport.topLeft());
-        painter.scale(viewport.width() / frame.image.width(), viewport.height() / frame.image.height());
-        painter.setClipPath(path());
-        painter.drawImage(0, 0, frame.image);
+        QTransform imageToScreen;
+        imageToScreen.translate(viewport.x(), viewport.y());
+        imageToScreen.scale(viewport.width() / frame.image.width(),
+                            viewport.height() / frame.image.height());
+        painter.setClipPath(imageToScreen.map(path()));
+        painter.drawPixmap(viewport.topLeft(), displayPixmap);
         painter.restore();
     }
     painter.setPen(QPen(QColor("#0bd18b"), 2));
@@ -203,20 +299,35 @@ void SelectionOverlay::paintEvent(QPaintEvent *) {
         const auto border = QRectF(selection).adjusted(-1, -1, 1, 1)
                                 .intersected(QRectF(rect()).adjusted(1, 1, -1, -1));
         painter.drawRect(border);
+        if (selectionReady) {
+            const auto area = QRectF(selection);
+            const QPointF handles[]{
+                area.topLeft(), {area.center().x(), area.top()}, area.topRight(),
+                {area.left(), area.center().y()}, {area.right(), area.center().y()},
+                area.bottomLeft(), {area.center().x(), area.bottom()}, area.bottomRight()};
+            painter.setPen(QPen(QColor("#123c30"), 1));
+            painter.setBrush(QColor("#0bd18b"));
+            for (const auto &point : handles)
+                painter.drawRect(QRectF(point - QPointF(4, 4), QSizeF(8, 8)));
+            painter.setBrush(Qt::NoBrush);
+        }
     }
     if (currentPhase == Phase::Selecting) {
-        const QString hint = QString("%1 × %2 · 单击选整屏，拖动选区域 · 松开立即编辑 · Esc 取消")
-                                 .arg(qRound(selected.width())).arg(qRound(selected.height()));
+        const QString hint =
+            selectionReady
+                ? QString("%1 × %2 · 拖动框移动 · 拖动边缘/角点调整 · Enter 或 ✅ 进入编辑 · Esc 取消")
+                      .arg(qRound(selected.width())).arg(qRound(selected.height()))
+                : QString("%1 × %2 · 单击选整屏，拖动选区域 · 松开后可调整 · Esc 取消")
+                      .arg(qRound(selected.width())).arg(qRound(selected.height()));
         QRect label(12, 12, qMax(1, qMin(width() - 24, 760)), 32);
         painter.fillRect(label, QColor(20, 25, 35, 235));
         painter.setPen(Qt::white);
         painter.drawText(label.adjusted(8, 0, -8, 0), Qt::AlignVCenter, hint);
-        if (!cursor.isNull()) {
+        if (!selectionReady && !cursor.isNull()) {
             auto pixel = imagePoint(cursor).toPoint();
             pixel.setX(qBound(0, pixel.x(), frame.image.width() - 1));
             pixel.setY(qBound(0, pixel.y(), frame.image.height() - 1));
-            QRect loupe(qBound(0, int(cursor.x() + 24), qMax(0, width() - 145)),
-                        qBound(0, int(cursor.y() + 30), qMax(0, height() - 150)), 136, 136);
+            QRect loupe = loupeGeometry(cursor);
             painter.fillRect(loupe, Qt::black);
             painter.drawImage(loupe.adjusted(3, 3, -3, -26), frame.image,
                               QRect(pixel - QPoint(zoom, zoom), QSize(zoom * 2 + 1, zoom * 2 + 1)));
@@ -241,6 +352,23 @@ void SelectionOverlay::mousePressEvent(QMouseEvent *e) {
     cursor = e->position();
     pressPosition = e->position();
     anchor = imagePoint(e->position());
+    adjustingSelection = selectionReady;
+    if (adjustingSelection) {
+        resizeHandle = handleAt(e->position());
+        startRect = selected;
+        moving = resizeHandle == ResizeHandle::Move;
+        resizing = resizeHandle != ResizeHandle::None && !moving;
+        dragging = resizeHandle != ResizeHandle::None;
+        if (dragging) {
+            update();
+            return;
+        }
+        // Clicking outside an established selection starts a new box.
+        selectionReady = false;
+        adjustingSelection = false;
+        hoverSelection = false;
+        selected = {};
+    }
     if (mode == CaptureMode::Polygon) {
         points << anchor;
         selected = points.boundingRect();
@@ -252,9 +380,9 @@ void SelectionOverlay::mousePressEvent(QMouseEvent *e) {
         hoverSelection = true;
     }
     startRect = selected;
-    resizing = !hoverSelection && !selected.isEmpty() &&
-               QLineF(anchor, selected.bottomRight()).length() < 16. * frame.image.width() / width();
-    moving = !hoverSelection && !resizing && selected.contains(anchor) && mode != CaptureMode::Freehand;
+    resizing = false;
+    moving = false;
+    resizeHandle = ResizeHandle::None;
     dragging = true;
     if (mode == CaptureMode::Freehand) {
         points.clear();
@@ -267,13 +395,37 @@ void SelectionOverlay::mousePressEvent(QMouseEvent *e) {
 void SelectionOverlay::mouseMoveEvent(QMouseEvent *e) {
     if (currentPhase != Phase::Selecting)
         return;
+    const auto previousCursor = cursor;
+    const bool hadCursor = !cursor.isNull();
+    const auto previousSelection = selectionGeometry();
     cursor = e->position();
     auto point = imagePoint(e->position());
     if (dragging) {
+        const auto before = selectionGeometry();
         updateDrag(point, e->modifiers());
+        if (selectionReady || adjustingSelection)
+            updateCursor(resizeHandle);
+        if (selectionReady || adjustingSelection) {
+            const int padding = 16;
+            QRect dirty = before.adjusted(-padding, -padding, padding, padding)
+                              .united(selectionGeometry().adjusted(-padding, -padding, padding, padding));
+            dirty = dirty.united(QRect(12, 12, qMax(1, qMin(width() - 24, 760)), 32));
+            update(dirty.intersected(rect()));
+            return;
+        }
+    } else if (selectionReady) {
+        resizeHandle = handleAt(e->position());
+        updateCursor(resizeHandle);
+        return;
     } else if (mode == CaptureMode::Region || (mode == CaptureMode::Window && frame.windows.isEmpty())) {
+        const bool wasHovering = hoverSelection;
         selected = frame.image.rect();
         hoverSelection = true;
+        if (hadCursor && wasHovering) {
+            QRect dirty = loupeGeometry(previousCursor).united(loupeGeometry(cursor)).adjusted(-2, -2, 2, 2);
+            update(dirty.intersected(rect()));
+            return;
+        }
     } else if (mode == CaptureMode::Window) {
         for (auto w : frame.windows) {
             auto global = QPointF(frame.desktop.x() + e->position().x() * frame.desktop.width() / width(),
@@ -284,24 +436,55 @@ void SelectionOverlay::mouseMoveEvent(QMouseEvent *e) {
             }
         }
     }
-    update();
+    QRect dirty = previousSelection.adjusted(-8, -8, 8, 8)
+                      .united(selectionGeometry().adjusted(-8, -8, 8, 8))
+                      .united(QRect(12, 12, qMax(1, qMin(width() - 24, 760)), 32));
+    if (hadCursor)
+        dirty = dirty.united(loupeGeometry(previousCursor)).united(loupeGeometry(cursor));
+    else
+        dirty = rect();
+    update(dirty.intersected(rect()));
 }
 void SelectionOverlay::updateDrag(QPointF point, Qt::KeyboardModifiers modifiers) {
     if (moving) {
         selected = startRect.translated(point - anchor);
+        QPointF correction;
+        if (selected.left() < 0)
+            correction.setX(-selected.left());
+        else if (selected.right() > frame.image.width())
+            correction.setX(frame.image.width() - selected.right());
+        if (selected.top() < 0)
+            correction.setY(-selected.top());
+        else if (selected.bottom() > frame.image.height())
+            correction.setY(frame.image.height() - selected.bottom());
+        selected.translate(correction);
         if (!points.isEmpty()) {
             auto delta = selected.topLeft() - points.boundingRect().topLeft();
             points.translate(delta);
         }
-    } else if (resizing)
-        selected = QRectF(startRect.topLeft(), point).normalized();
+    } else if (resizing) {
+        auto rect = startRect;
+        if (resizeHandle == ResizeHandle::Left || resizeHandle == ResizeHandle::TopLeft ||
+            resizeHandle == ResizeHandle::BottomLeft)
+            rect.setLeft(point.x());
+        if (resizeHandle == ResizeHandle::Right || resizeHandle == ResizeHandle::TopRight ||
+            resizeHandle == ResizeHandle::BottomRight)
+            rect.setRight(point.x());
+        if (resizeHandle == ResizeHandle::Top || resizeHandle == ResizeHandle::TopLeft ||
+            resizeHandle == ResizeHandle::TopRight)
+            rect.setTop(point.y());
+        if (resizeHandle == ResizeHandle::Bottom || resizeHandle == ResizeHandle::BottomLeft ||
+            resizeHandle == ResizeHandle::BottomRight)
+            rect.setBottom(point.y());
+        selected = rect.normalized();
+    }
     else if (mode == CaptureMode::Freehand) {
         points << point;
         selected = points.boundingRect();
     } else
         selected = QRectF(anchor, point).normalized();
     // 邻近图像边界吸附，Alt 可暂时关闭。
-    if (!(modifiers & Qt::AltModifier) && !moving && mode != CaptureMode::Freehand) {
+    if (!(modifiers & Qt::AltModifier) && !moving && !resizing && mode != CaptureMode::Freehand) {
         if (selected.left() < 6)
             selected.setLeft(0);
         if (selected.top() < 6)
@@ -311,26 +494,42 @@ void SelectionOverlay::updateDrag(QPointF point, Qt::KeyboardModifiers modifiers
         if (frame.image.height() - selected.bottom() < 6)
             selected.setBottom(frame.image.height());
     }
+    if (toolbar)
+        positionEditor();
 }
 void SelectionOverlay::mouseReleaseEvent(QMouseEvent *event) {
     if (currentPhase != Phase::Selecting || event->button() != Qt::LeftButton)
         return;
+    cursor = event->position();
     if (dragging && hoverSelection &&
         QLineF(pressPosition, event->position()).length() < QGuiApplication::styleHints()->startDragDistance())
         selected = startRect;
     else if (dragging)
         updateDrag(imagePoint(event->position()), event->modifiers());
+    const bool wasAdjusting = adjustingSelection;
     hoverSelection = false;
     dragging = false;
     moving = false;
     resizing = false;
     selected = selected.intersected(frame.image.rect());
-    if (mode != CaptureMode::Polygon)
+    resizeHandle = ResizeHandle::None;
+    if (mode == CaptureMode::Freehand) {
         beginQuickEditing();
+    } else if (mode != CaptureMode::Polygon) {
+        if (wasAdjusting) {
+            selectionReady = !selected.isEmpty();
+            if (selectionReady)
+                prepareQuickEditor();
+        } else {
+            finishSelection();
+        }
+        if (selectionReady)
+            updateCursor(handleAt(event->position()));
+    }
     update();
 }
 void SelectionOverlay::mouseDoubleClickEvent(QMouseEvent *) {
-    if (currentPhase == Phase::Selecting)
+    if (currentPhase == Phase::Selecting && mode == CaptureMode::Polygon)
         beginQuickEditing();
 }
 void SelectionOverlay::keyPressEvent(QKeyEvent *e) {
@@ -385,38 +584,81 @@ void SelectionOverlay::wheelEvent(QWheelEvent *e) {
     zoom = qBound(2, zoom + (e->angleDelta().y() > 0 ? -1 : 1), 24);
     update();
 }
-void SelectionOverlay::beginQuickEditing() {
+void SelectionOverlay::finishSelection() {
+    if (selected.width() < 1 || selected.height() < 1)
+        return;
+    hoverSelection = false;
+    selectionReady = true;
+    prepareQuickEditor();
+    if (!selectionNotified) {
+        selectionNotified = true;
+        emit selectionFinalized();
+    }
+    updateCursor(handleAt(cursor));
+    update();
+}
+void SelectionOverlay::prepareQuickEditor() {
     if (currentPhase != Phase::Selecting || selected.width() < 1 || selected.height() < 1)
         return;
-    auto image = anchoredSelection ? frame.image : maskedSelection(frame.image, path());
-    if (image.isNull())
-        return;
-    if (!editing)
-        editing = std::make_shared<EditorSession>(image);
-    else
-        editing->document.reset(image);
-    currentPhase = Phase::QuickEditing;
-    canvas = new Canvas(&editing->document, this);
-    canvas->setObjectName("quickCanvas");
-    canvas->setOverlayMode(true);
-    connect(canvas, &Canvas::confirmRequested, this, &SelectionOverlay::confirm);
-    connect(canvas, &Canvas::copyRequested, this, &SelectionOverlay::copy);
-    createToolbar();
+    if (!editing || preparedSelection != selected) {
+        auto image = anchoredSelection ? frame.image : maskedSelection(frame.image, path());
+        if (image.isNull())
+            return;
+        if (!editing)
+            editing = std::make_shared<EditorSession>(image);
+        else
+            editing->document.reset(image);
+        preparedSelection = selected;
+    }
+    if (!canvas) {
+        canvas = new Canvas(&editing->document, this);
+        canvas->setObjectName("quickCanvas");
+        canvas->setOverlayMode(true);
+        selectionBorder = new QFrame(this);
+        selectionBorder->setObjectName("selectionGreenBorder");
+        selectionBorder->setAttribute(Qt::WA_TransparentForMouseEvents);
+        selectionBorder->setAttribute(Qt::WA_NoSystemBackground);
+        selectionBorder->setStyleSheet("QFrame#selectionGreenBorder{background:transparent;"
+                                       "border:2px solid #0bd18b}");
+        connect(canvas, &Canvas::confirmRequested, this, &SelectionOverlay::confirm);
+        connect(canvas, &Canvas::copyRequested, this, &SelectionOverlay::copy);
+        connect(canvas, &Canvas::toolChanged, this, [this](Tool) {
+            if (currentPhase == Phase::Selecting)
+                showQuickCanvas();
+        });
+    }
+    if (!toolbar)
+        createToolbar();
+    canvas->hide();
     positionEditor();
-    canvas->show();
     toolbar->show();
     toolbar->raise();
+}
+void SelectionOverlay::showQuickCanvas() {
+    if (currentPhase != Phase::Selecting || !canvas)
+        return;
+    selectionReady = false;
+    currentPhase = Phase::QuickEditing;
+    canvas->show();
+    positionEditor();
+    toolbar->show();
+    toolbar->raise();
+    selectionBorder->raise();
+    toolbar->raise();
+    if (auto *confirm = toolbar->findChild<QAction *>("quickConfirmAction"))
+        confirm->setToolTip("进入高级编辑器（Enter）");
     canvas->setFocus();
     update();
-    if (anchoredSelection) {
-        // 编辑器随首帧显示，等 Application 接好信号后再通知进入编辑状态。
-        QTimer::singleShot(0, this, [this] {
-            if (currentPhase == Phase::QuickEditing)
-                emit quickEditingStarted();
-        });
-    } else {
+    if (!quickEditingNotified) {
+        quickEditingNotified = true;
         emit quickEditingStarted();
     }
+}
+void SelectionOverlay::beginQuickEditing() {
+    if (currentPhase != Phase::Selecting)
+        return;
+    prepareQuickEditor();
+    showQuickCanvas();
 }
 void SelectionOverlay::createToolbar() {
     toolbar = new QFrame(this);
@@ -439,7 +681,7 @@ void SelectionOverlay::createToolbar() {
     actions->setObjectName("quickActionTools");
     row->addWidget(actions);
     auto add = [&](QString name, ToolIcon icon, auto callback) {
-        auto *action = actions->addAction(toolIcon(icon), name);
+        auto *action = actions->addAction(toolIcon(icon, true), name);
         connect(action, &QAction::triggered, this, callback);
         return action;
     };
@@ -468,42 +710,21 @@ void SelectionOverlay::createToolbar() {
         updateTranslation(editing->isTranslationEnabled());
     });
     updateTranslation(editing->isTranslationEnabled());
-    add("全选文字", ToolIcon::SelectText, [this] { canvas->selectAllText(); canvas->setFocus(); });
-    add("复制文字", ToolIcon::CopyText, [this] {
-        TextLayout text;
-        text.setLines(editing->document.state().ocr);
-        QApplication::clipboard()->setText(canvas->selectedText().isEmpty() ? text.all() : canvas->selectedText());
-    });
-    add("复制译文", ToolIcon::CopyTranslation, [this] { editing->copyTranslation(); });
-    auto *mode = add("原文、译文、对照", ToolIcon::View, [] {});
-    auto *viewMenu = new QMenu(toolbar);
-    viewMenu->setObjectName("translationViewMenu");
-    auto *viewGroup = new QActionGroup(viewMenu);
-    const QStringList views{"原文", "译文", "对照"};
-    for (int index = 0; index < views.size(); ++index) {
-        auto *view = viewMenu->addAction(views[index]);
-        view->setCheckable(true);
-        view->setData(index);
-        viewGroup->addAction(view);
-        view->setChecked(index == editing->document.state().translationMode);
-        connect(view, &QAction::triggered, this, [this, index] {
-            editing->document.change([index](auto &state) { state.translationMode = index; });
-        });
-    }
-    mode->setMenu(viewMenu);
-    qobject_cast<QToolButton *>(actions->widgetForAction(mode))->setPopupMode(QToolButton::InstantPopup);
     auto *cancelTask = add("取消任务", ToolIcon::Stop, [this] { editing->cancel(); });
     cancelTask->setVisible(false);
     actions->addSeparator();
     add("复制图片", ToolIcon::Copy, [this] { canvas->finishTextEdit(true); editing->copyImage(); });
     add("保存", ToolIcon::Save, [this] { canvas->finishTextEdit(true); editing->requestSave(this); });
     add("❌", ToolIcon::Cancel, [this] { close(); })->setToolTip("取消截图（Esc）");
-    add("✅", ToolIcon::Confirm, [this] { confirm(); })->setToolTip("进入高级编辑器（Enter）");
-    configureIconToolbar(actions);
-    originalPreview = new QLabel(toolbar);
-    originalPreview->setPixmap(QPixmap::fromImage(editing->document.original().scaled(220, 120, Qt::KeepAspectRatio)));
-    originalPreview->hide();
-    layout->addWidget(originalPreview);
+    auto *confirmAction = add("✅", ToolIcon::Confirm, [this] {
+        if (currentPhase == Phase::Selecting)
+            beginQuickEditing();
+        else
+            confirm();
+    });
+    confirmAction->setObjectName("quickConfirmAction");
+    confirmAction->setToolTip("进入即时编辑（Enter）");
+    configureIconToolbar(actions, true);
     auto *approval = new QWidget(toolbar);
     auto *approvalLayout = new QHBoxLayout(approval);
     auto *destination = new QLabel(approval);
@@ -521,11 +742,13 @@ void SelectionOverlay::createToolbar() {
             [this, approval, destination](QString endpoint) {
                 destination->setText("将 OCR 文字发送到：" + endpoint);
                 approval->show();
+                fitToolbar();
                 positionEditor();
             });
     connect(editing.get(), &EditorSession::taskChanged, this, [this, cancelTask, approval] {
         cancelTask->setVisible(editing->task() != EditorSession::Task::Idle || editing->awaitingApproval());
         approval->setVisible(editing->awaitingApproval());
+        fitToolbar();
         positionEditor();
     });
     statusLabel = new QLabel(toolbar);
@@ -536,12 +759,14 @@ void SelectionOverlay::createToolbar() {
         statusLabel->setText(message);
         statusLabel->setStyleSheet(error ? "color:#ff98a3" : "color:#c4cbd4");
         statusLabel->show();
+        fitToolbar();
         positionEditor();
         if (!error)
             QTimer::singleShot(5000, this, [this, message] {
                 if (statusLabel->text() == message && editing->task() == EditorSession::Task::Idle &&
                     !editing->awaitingApproval()) {
                     statusLabel->hide();
+                    fitToolbar();
                     positionEditor();
                 }
             });
@@ -549,22 +774,19 @@ void SelectionOverlay::createToolbar() {
     connect(canvas, &Canvas::status, this, [this](QString message) {
         statusLabel->setText(message);
         statusLabel->show();
+        fitToolbar();
         positionEditor();
     });
-    connect(&editing->document, &Document::changed, this, [this, undo, redo, viewGroup] {
+    connect(&editing->document, &Document::changed, this, [this, undo, redo] {
         undo->setEnabled(editing->document.canUndo());
         redo->setEnabled(editing->document.canRedo());
-        for (auto *view : viewGroup->actions())
-            view->setChecked(view->data().toInt() == editing->document.state().translationMode);
-        originalPreview->setVisible(editing->document.state().translationMode == 2);
         positionEditor();
     });
+    fitToolbar();
 }
-void SelectionOverlay::positionEditor() {
-    if (!canvas || !toolbar)
+void SelectionOverlay::fitToolbar() {
+    if (!toolbar)
         return;
-    const auto selection = selectionGeometry();
-    canvas->setGeometry(selection);
     auto *row = toolbar->findChild<QBoxLayout *>("quickToolRow");
     auto *tools = toolbar->findChild<QToolBar *>("quickAnnotationTools");
     auto *actions = toolbar->findChild<QToolBar *>("quickActionTools");
@@ -580,6 +802,21 @@ void SelectionOverlay::positionEditor() {
     toolbar->setFixedWidth(qMin(available, desired));
     toolbar->adjustSize();
     toolbar->layout()->activate();
+}
+void SelectionOverlay::positionEditor() {
+    if (!canvas || !toolbar)
+        return;
+    const auto selection = selectionGeometry();
+    canvas->setGeometry(selection);
+    if (selectionBorder) {
+        const auto border = selection.adjusted(1, 1, -1, -1).intersected(rect());
+        selectionBorder->setGeometry(border);
+        selectionBorder->setVisible(currentPhase == Phase::QuickEditing);
+        if (selectionBorder->isVisible())
+            selectionBorder->raise();
+    }
+    if (toolbar->width() <= 0 || toolbar->height() <= 0)
+        fitToolbar();
     const int x = qBound(8, selection.left(), qMax(8, width() - toolbar->width() - 8));
     int y = selection.bottom() + 8;
     if (y + toolbar->height() > height() - 8)
@@ -602,13 +839,30 @@ void SelectionOverlay::translate() {
         editing->toggleTranslation(canvas->selectedLines());
 }
 void SelectionOverlay::copy() {
-    if (!canvas->selectedText().isEmpty())
-        QApplication::clipboard()->setText(canvas->selectedText());
-    else
+    const auto selected = canvas->selectedLines();
+    if (selected.isEmpty()) {
         editing->copyImage();
+        return;
+    }
+    if (editing->isTranslationEnabled()) {
+        QHash<QString, QString> translated;
+        for (const auto &unit : editing->document.state().translations)
+            if (unit.status == "done")
+                translated.insert(unit.id, unit.target);
+        QStringList text;
+        for (const auto &line : selected)
+            if (translated.contains(line.id))
+                text << translated.value(line.id);
+        if (!text.isEmpty()) {
+            QApplication::clipboard()->setText(text.join('\n'));
+            return;
+        }
+    }
+    QApplication::clipboard()->setText(canvas->selectedText());
 }
 void SelectionOverlay::resizeEvent(QResizeEvent *event) {
     QWidget::resizeEvent(event);
+    fitToolbar();
     positionEditor();
 }
 void SelectionOverlay::closeEvent(QCloseEvent *event) {
@@ -624,8 +878,10 @@ void SelectionOverlay::closeEvent(QCloseEvent *event) {
     QWidget::closeEvent(event);
 }
 void SelectionOverlay::confirm() {
-    if (currentPhase == Phase::Selecting)
+    if (currentPhase == Phase::Selecting) {
         beginQuickEditing();
+        return;
+    }
     if (currentPhase != Phase::QuickEditing)
         return;
     canvas->finishTextEdit(true);

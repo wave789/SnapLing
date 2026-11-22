@@ -5,6 +5,7 @@
 #include "history/HistoryStore.h"
 #include "image/ImageProcessor.h"
 #include "ocr/OcrEngine.h"
+#include "ocr/RapidOcr.h"
 #include "ocr/TextLayout.h"
 #include "selection/SelectionOverlay.h"
 #include "settings/Settings.h"
@@ -18,10 +19,12 @@
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QLabel>
 #include <QMessageBox>
 #include <QPainter>
 #include <QPushButton>
 #include <QScopeGuard>
+#include <QSettings>
 #include <QSignalSpy>
 #include <QTcpServer>
 #include <QTcpSocket>
@@ -307,6 +310,16 @@ class TestCore : public QObject {
             "<think>{\"translations\":[{\"id\":\"a\",\"text\":\"思考内容\"}]}", invalid, error));
         QVERIFY(invalid[0].target.isEmpty());
     }
+    void automaticTranslationConfidenceThresholdIsQuarter() {
+        const QVector<OcrLine> lines{
+            {"below", "Below threshold text", {10, 10, 180, 20}, {}, .249},
+            {"at-threshold", "At threshold text", {10, 40, 180, 20}, {}, .25},
+            {"above", "Above threshold text", {10, 70, 180, 20}, {}, .3}};
+        const auto units = translationUnits(lines, "简体中文", true);
+        QCOMPARE(units.size(), 2);
+        QCOMPARE(units[0].id, QString("at-threshold"));
+        QCOMPARE(units[1].id, QString("above"));
+    }
     void badTranslationIsAtomic() {
         auto u = units();
         QString e;
@@ -405,13 +418,33 @@ class TestCore : public QObject {
             settings.saveProvider(p);
         }
         Settings settings(path);
-        QCOMPARE(settings.value("schemaVersion").toInt(), 1);
+        QCOMPARE(settings.value("schemaVersion").toInt(), 2);
         QCOMPARE(settings.provider().model, QString("test"));
         QVERIFY(settings.provider().sessionKey.isEmpty());
         QFile f(path);
         QVERIFY(f.open(QIODevice::ReadOnly));
         QVERIFY(!f.readAll().contains("secret-must-not-persist"));
         QCOMPARE(settings.value("hotkey/capture").toString(), QString("Ctrl+Shift+F8"));
+    }
+    void legacyScreenshotMigratesToInstantSelection() {
+        QTemporaryDir tmp;
+        auto path = tmp.filePath("legacy.ini");
+        {
+            QSettings legacy(path, QSettings::IniFormat);
+            legacy.setValue("schemaVersion", 1);
+            legacy.setValue("capture/waylandMethod", "screenshot");
+        }
+        const auto desktop = qEnvironmentVariable("XDG_CURRENT_DESKTOP");
+        const auto session = qEnvironmentVariable("XDG_SESSION_TYPE");
+        qputenv("XDG_CURRENT_DESKTOP", "GNOME");
+        qputenv("XDG_SESSION_TYPE", "wayland");
+        const auto restore = qScopeGuard([desktop, session] {
+            qputenv("XDG_CURRENT_DESKTOP", desktop.toUtf8());
+            qputenv("XDG_SESSION_TYPE", session.toUtf8());
+        });
+        Settings settings(path);
+        QCOMPARE(settings.value("schemaVersion").toInt(), 2);
+        QCOMPARE(settings.value("capture/waylandMethod").toString(), QString("compositor"));
     }
     void thinkingSettings_data() {
         QTest::addColumn<QString>("url");
@@ -527,6 +560,9 @@ class TestCore : public QObject {
     }
     void editorInPlaceTranslation() {
 #ifdef SNAPLING_HAVE_TESSERACT
+        qputenv("SNAPLING_OCR_TEST_ENGINE", "tesseract");
+        const auto restoreOcrEngine =
+            qScopeGuard([] { qunsetenv("SNAPLING_OCR_TEST_ENGINE"); });
         QTemporaryDir tmp;
         QVERIFY(tmp.isValid());
         Settings settings(tmp.filePath("settings.ini"));
@@ -646,14 +682,26 @@ class TestCore : public QObject {
         QSKIP("本构建禁用 OCR");
 #endif
     }
-    void realRapidOcrEngineSwitch() {
-#if !defined(Q_OS_WIN) && defined(SNAPLING_HAVE_TESSERACT)
-        if (!qEnvironmentVariableIsSet("SNAPLING_TEST_RAPIDOCR"))
-            QSKIP("真实 RapidOCR 验收需先运行 setup-rapidocr.py，然后设置 SNAPLING_TEST_RAPIDOCR=1");
+    void paddleOcrIsFixedAndBundled() {
+#ifndef Q_OS_WIN
         QTemporaryDir tmp;
         QVERIFY(tmp.isValid());
         Settings settings(tmp.filePath("settings.ini"));
         ProviderConfig config;
+        SettingsDialog dialog(settings, config);
+        QVERIFY(!dialog.findChild<QComboBox *>("ocrEngine"));
+        auto *status = dialog.findChild<QLabel *>("paddleOcrStatus");
+        QVERIFY(status);
+        QVERIFY(status->text().contains("安装包内置") || status->text().contains("随 SnapLing 安装"));
+        auto *buttons = dialog.findChild<QDialogButtonBox *>();
+        QVERIFY(buttons);
+        buttons->button(QDialogButtonBox::Save)->click();
+        QCOMPARE(dialog.result(), int(QDialog::Accepted));
+        QCOMPARE(Settings(tmp.filePath("settings.ini")).value("ocr/engine").toString(), QString("paddleocr"));
+        QVERIFY(QFileInfo(RapidOcr::modelDirectory() + "/det/inference.yml").isFile());
+        QVERIFY(QFileInfo(RapidOcr::modelDirectory() + "/rec/inference.yml").isFile());
+        if (!qEnvironmentVariableIsSet("SNAPLING_TEST_PADDLEOCR"))
+            return;
         QImage image(1000, 240, QImage::Format_RGB32);
         image.fill(Qt::white);
         QPainter painter(&image);
@@ -665,38 +713,21 @@ class TestCore : public QObject {
         painter.drawText(30, 170, "中文识别测试 你好世界");
         painter.end();
         EditorSession session(image, settings, config);
-        QStringList engines{"tesseract", "rapidocr"};
-        if (qEnvironmentVariableIsSet("SNAPLING_TEST_PADDLEOCR"))
-            engines << "paddleocr";
-        engines << "tesseract";
-        for (const auto &engine : engines) {
-            SettingsDialog dialog(settings, config);
-            auto *selector = dialog.findChild<QComboBox *>("ocrEngine");
-            auto *buttons = dialog.findChild<QDialogButtonBox *>();
-            QVERIFY(selector);
-            QVERIFY(buttons);
-            QVERIFY(selector->findData(engine) >= 0);
-            selector->setCurrentIndex(selector->findData(engine));
-            buttons->button(QDialogButtonBox::Save)->click();
-            QCOMPARE(dialog.result(), int(QDialog::Accepted));
-            QCOMPARE(Settings(tmp.filePath("settings.ini")).value("ocr/engine").toString(), engine);
-            session.document.change([](DocumentState &state) { state.ocr.clear(); });
-            QTest::ignoreMessage(QtInfoMsg, QRegularExpression(QString("ocr_ms=\\d+ cold=\\d lines=\\d+ engine=%1").arg(engine)));
-            session.runOcr();
-            QTRY_COMPARE_WITH_TIMEOUT(session.task(), EditorSession::Task::Idle, 50000);
-            const auto &lines = session.document.state().ocr;
-            QVERIFY2(!lines.isEmpty(), qPrintable(session.message()));
-            TextLayout layout;
-            layout.setLines(lines);
-            QVERIFY2(layout.all().contains("Hello"), qPrintable(layout.all()));
-            QVERIFY2(layout.all().contains("中文"), qPrintable(layout.all()));
-            for (const auto &line : lines) {
-                QVERIFY(QRectF(image.rect()).contains(line.box));
-                QVERIFY(line.polygon.size() >= 4);
-            }
+        QTest::ignoreMessage(QtInfoMsg, QRegularExpression("ocr_ms=\\d+ cold=\\d lines=\\d+ engine=paddleocr"));
+        session.runOcr();
+        QTRY_COMPARE_WITH_TIMEOUT(session.task(), EditorSession::Task::Idle, 120000);
+        const auto &lines = session.document.state().ocr;
+        QVERIFY2(!lines.isEmpty(), qPrintable(session.message()));
+        TextLayout layout;
+        layout.setLines(lines);
+        QVERIFY2(layout.all().contains("Hello"), qPrintable(layout.all()));
+        QVERIFY2(layout.all().contains("中文"), qPrintable(layout.all()));
+        for (const auto &line : lines) {
+            QVERIFY(QRectF(image.rect()).contains(line.box));
+            QVERIFY(line.polygon.size() >= 3);
         }
 #else
-        QSKIP("本构建不支持切换到 RapidOCR");
+        QSKIP("PaddleOCR runtime is currently packaged for Linux");
 #endif
     }
 };

@@ -46,7 +46,7 @@ void addGnomeScreenshotAcceleration(QFormLayout *form) {
     status->setWordWrap(true);
     layout->addWidget(button);
     layout->addWidget(status, 1);
-    form->addRow("单次截图提速", row);
+    form->addRow("GNOME 即时框选", row);
 
     const auto call = [row](const QString &method, auto handler) {
         auto message = QDBusMessage::createMethodCall("org.gnome.Shell",
@@ -90,7 +90,7 @@ void addGnomeScreenshotAcceleration(QFormLayout *form) {
             else if (state == 3)
                 status->setText("扩展加载失败。可在 GNOME 扩展应用中查看错误。");
             else if (active && version >= 4)
-                status->setText("截图提速已启用。可切换到 GNOME 快速框选。");
+                status->setText("已启用；主截图快捷键默认在 GNOME 合成器中立即显示选区。");
             else if (active && version >= 3)
                 status->setText("已跳过截图闪光和 SnapLing 选区动画。");
             else if (active)
@@ -98,7 +98,7 @@ void addGnomeScreenshotAcceleration(QFormLayout *form) {
             else if (enabled)
                 status->setText("已请求启用，GNOME 尚未激活扩展。");
             else
-                status->setText("启用后跳过截图闪光。新版扩展也会跳过 SnapLing 选区动画。");
+                status->setText("建议启用；安装新版后 SnapLing 会自动尝试启用即时框选。");
         });
     };
     QObject::connect(button, &QPushButton::clicked, row, [call, refresh, button, status] {
@@ -142,16 +142,17 @@ SettingsDialog::SettingsDialog(Settings &s, ProviderConfig &runtime, QWidget *pa
     theme->setCurrentIndex(s.value("general/theme", 0).toInt());
     general->addRow("主题", theme);
     auto *captureMethod = new QComboBox(this);
-    captureMethod->addItem("系统单次截图（默认，无持续共享）", "screenshot");
-    captureMethod->addItem("兼容截图（需要系统选择共享屏幕，取图后结束）", "screencast");
     const bool gnome = qEnvironmentVariable("XDG_CURRENT_DESKTOP").split(':').contains("GNOME", Qt::CaseInsensitive);
     if (gnome) {
-        captureMethod->addItem("GNOME 快速框选（松手即编辑）", "compositor");
-        captureMethod->setItemData(captureMethod->count() - 1,
-                                   "启用截图提速后，在“整个桌面”矩形截图中使用 GNOME 快速框选。",
+        captureMethod->addItem("GNOME 即时框选（推荐，立即选屏）", "compositor");
+        captureMethod->setItemData(0,
+                                   "GNOME 合成器先冻结桌面再显示选区；GNOME 快速框选不可用时自动回退。",
                                    Qt::ToolTipRole);
     }
-    captureMethod->setCurrentIndex(qMax(0, captureMethod->findData(s.value("capture/waylandMethod", "screenshot"))));
+    captureMethod->addItem("系统单次截图（兼容回退，无持续共享）", "screenshot");
+    captureMethod->addItem("兼容截图（需要系统选择共享屏幕，取图后结束）", "screencast");
+    const auto defaultMethod = gnome ? QStringLiteral("compositor") : QStringLiteral("screenshot");
+    captureMethod->setCurrentIndex(qMax(0, captureMethod->findData(s.value("capture/waylandMethod", defaultMethod))));
     if (QGuiApplication::platformName().contains("wayland") || qEnvironmentVariable("XDG_SESSION_TYPE") == "wayland") {
         general->addRow("截图方式", captureMethod);
 #ifndef Q_OS_WIN
@@ -205,84 +206,28 @@ SettingsDialog::SettingsDialog(Settings &s, ProviderConfig &runtime, QWidget *pa
     hint->setTextInteractionFlags(Qt::TextSelectableByMouse);
     hotkeys->addRow(hint);
     auto *ocr = page("OCR");
-    auto *ocrEngine = new QComboBox;
-    ocrEngine->setObjectName("ocrEngine");
-    ocrEngine->addItem("Tesseract · 简体中文 / 英文", "tesseract");
+    ocr->addRow("识别引擎", new QLabel("PaddleOCR · PP-OCRv6 Small（内置）"));
+    auto *paddleStatus = new QLabel;
+    paddleStatus->setObjectName("paddleOcrStatus");
+    paddleStatus->setWordWrap(true);
+    paddleStatus->setTextFormat(Qt::PlainText);
+    paddleStatus->setTextInteractionFlags(Qt::TextSelectableByMouse);
 #ifndef Q_OS_WIN
-    ocrEngine->addItem("RapidOCR · 简体中文 / 英文", "rapidocr");
-    ocrEngine->addItem("PaddleOCR · PP-OCRv6 Small", "paddleocr");
+    const QFileInfo launcher(RapidOcr::launcher(RapidOcr::Profile::Paddle));
+    const QFileInfo detector(RapidOcr::modelDirectory() + "/det/PP-OCRv6_small_det.onnx");
+    const QFileInfo recognizer(RapidOcr::modelDirectory() + "/rec/PP-OCRv6_small_rec.onnx");
+    const QFileInfo detectorConfig(RapidOcr::modelDirectory() + "/det/inference.yml");
+    const QFileInfo recognizerConfig(RapidOcr::modelDirectory() + "/rec/inference.yml");
+    const bool ready = launcher.isExecutable() && detector.isFile() && recognizer.isFile() &&
+                       detectorConfig.isFile() && recognizerConfig.isFile();
+    paddleStatus->setText(
+        QString(ready ? "模型、配置和本地推理环境已随 SnapLing 安装，无需下载或选择目录。\n"
+                      : "正式安装包内置完整 OCR 运行环境；当前开发构建尚未生成运行时。\n") +
+        "模型目录：" + RapidOcr::modelDirectory() + "\n运行环境：" + launcher.absolutePath());
+#else
+    paddleStatus->setText("当前平台未提供 PaddleOCR 运行时。");
 #endif
-    ocrEngine->setCurrentIndex(qMax(0, ocrEngine->findData(s.value("ocr/engine", "tesseract"))));
-    ocr->addRow("识别引擎", ocrEngine);
-    auto *modelPath = new QLineEdit(s.value("ocr/path").toString());
-    modelPath->setPlaceholderText("留空自动查找");
-    modelPath->setToolTip("用户模型可放在 " + userTessdataDirectory());
-    auto *choose = new QPushButton("选择模型目录…");
-    ocr->addRow("模型目录", modelPath);
-    ocr->addRow(choose);
-    auto *langs = new QComboBox;
-    langs->addItems({"chi_sim+eng", "eng", "chi_sim"});
-    langs->setCurrentText(s.value("ocr/languages", "chi_sim+eng").toString());
-    ocr->addRow("语言", langs);
-    auto *modelStatus = new QLabel;
-    modelStatus->setWordWrap(true);
-    modelStatus->setTextFormat(Qt::PlainText);
-    modelStatus->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    ocr->addRow(modelStatus);
-    auto resolvePath = [modelPath, langs] {
-        const auto selected = availableTessdata(modelPath->text(), langs->currentText());
-        return selected.isEmpty() ? findTessdata(langs->currentText()) : selected;
-    };
-    auto refreshModels = [modelPath, langs, modelStatus, resolvePath] {
-        const bool customMissing = !modelPath->text().trimmed().isEmpty() &&
-                                   availableTessdata(modelPath->text(), langs->currentText()).isEmpty();
-        const auto path = resolvePath();
-        if (path.isEmpty())
-            modelStatus->setText("未找到所选语言的模型。请选择包含所需 .traineddata 文件的目录。");
-        else
-            modelStatus->setText((customMissing ? "指定目录缺少所选模型，当前使用 " : "当前使用 ") + path);
-    };
-    connect(modelPath, &QLineEdit::textChanged, this, refreshModels);
-    connect(langs, &QComboBox::currentTextChanged, this, refreshModels);
-    refreshModels();
-    connect(choose, &QPushButton::clicked, this, [this, modelPath, resolvePath] {
-        auto path = QFileDialog::getExistingDirectory(this, "选择含 traineddata 的目录", resolvePath());
-        if (!path.isEmpty())
-            modelPath->setText(path);
-    });
-    auto *hash = new QPushButton("查看模型大小与 SHA256");
-    ocr->addRow(hash);
-    connect(hash, &QPushButton::clicked, this, [this, resolvePath] {
-        QMessageBox::information(this, "本地模型完整性", modelInfo(resolvePath()));
-    });
-    auto *rapidStatus = new QLabel;
-    rapidStatus->setWordWrap(true);
-    rapidStatus->setTextFormat(Qt::PlainText);
-    rapidStatus->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    ocr->addRow(rapidStatus);
-    auto showEngineOptions = [ocr, ocrEngine, modelPath, choose, langs, modelStatus, hash, rapidStatus, refreshModels] {
-        const auto engine = ocrEngine->currentData().toString();
-        const bool automaticModels = engine != "tesseract";
-        for (auto *widget : QList<QWidget *>{modelPath, choose, langs, modelStatus, hash})
-            ocr->setRowVisible(widget, !automaticModels);
-        ocr->setRowVisible(rapidStatus, automaticModels);
-#ifndef Q_OS_WIN
-        if (automaticModels) {
-            const auto profile = engine == "paddleocr" ? RapidOcr::Profile::Paddle : RapidOcr::Profile::Rapid;
-            const auto path = ocrModelRoot() + (profile == RapidOcr::Profile::Paddle ? "/paddleocr" : "/RapidOCR/models");
-            const QFileInfo launcher(RapidOcr::launcher(profile));
-            QString message = "模型目录：" + path;
-            if (!launcher.isFile() || !launcher.isExecutable())
-                message += "\n请先运行 python3 tools/setup-rapidocr.py 准备本地 ONNX 运行环境。";
-            rapidStatus->setText(message);
-        } else
-#endif
-        {
-            refreshModels();
-        }
-    };
-    connect(ocrEngine, &QComboBox::currentIndexChanged, this, showEngineOptions);
-    showEngineOptions();
+    ocr->addRow(paddleStatus);
     auto *ai = page("AI 翻译");
     auto *preset = new QComboBox;
     preset->addItems({"本地 Ollama", "OpenAI 兼容服务"});
@@ -442,8 +387,7 @@ SettingsDialog::SettingsDialog(Settings &s, ProviderConfig &runtime, QWidget *pa
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
     connect(buttons, &QDialogButtonBox::accepted, this,
             [&s, &runtime, this, config, extraKeys, profiles, startup, theme, captureMethod, background,
-             autoCopy, closeCopy, saveDir, format, quality, jpgBg, history, key, ocrEngine, modelPath,
-             langs, cache, days, limit] {
+             autoCopy, closeCopy, saveDir, format, quality, jpgBg, history, key, cache, days, limit] {
                 if (key->keySequence().count() != 1) {
                     QMessageBox::warning(this, "快捷键无效", "请输入单组快捷键");
                     return;
@@ -477,9 +421,7 @@ SettingsDialog::SettingsDialog(Settings &s, ProviderConfig &runtime, QWidget *pa
                 s.set("general/jpegBackground", jpgBg->text());
                 s.set("history/enabled", history->isChecked());
                 s.set("hotkey/capture", key->keySequence().toString(QKeySequence::PortableText));
-                s.set("ocr/engine", ocrEngine->currentData());
-                s.set("ocr/path", modelPath->text());
-                s.set("ocr/languages", langs->currentText());
+                s.set("ocr/engine", "paddleocr");
                 s.set("ocr/cache", cache->isChecked());
                 s.set("history/days", days->value());
                 s.set("history/megabytes", limit->value());

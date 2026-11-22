@@ -23,9 +23,6 @@ int main(int argc, char **argv) {
     // 本程序只使用光栅 Widgets，避免 XCB 加载不需要的 OpenGL 驱动。
     if (!qEnvironmentVariableIsSet("QT_XCB_GL_INTEGRATION"))
         qputenv("QT_XCB_GL_INTEGRATION", "none");
-    // 使用 Qt 光栅主题，避免 GTK 间接加载 Mesa/LLVM；允许用户通过环境变量覆盖。
-    if (!qEnvironmentVariableIsSet("QT_QPA_PLATFORMTHEME"))
-        qputenv("QT_QPA_PLATFORMTHEME", "generic");
 #endif
     QElapsedTimer startup;
     startup.start();
@@ -35,7 +32,7 @@ int main(int argc, char **argv) {
     Q_INIT_RESOURCE(resources);
     app.setApplicationName("SnapLing");
     app.setOrganizationName("SnapLing");
-    app.setApplicationVersion("0.1.0");
+    app.setApplicationVersion("0.3.4");
     app.setQuitOnLastWindowClosed(false);
     app.setWindowIcon(QIcon(":/snapling.svg"));
     QCommandLineParser parser;

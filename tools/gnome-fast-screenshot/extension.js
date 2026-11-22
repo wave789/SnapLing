@@ -29,8 +29,10 @@ export default class SkipScreenshotFlash extends Extension {
                 if (!original.call(this, actor, types))
                     return false;
                 const window = actor.meta_window;
-                return !(window?.get_wm_class() === 'io.snapling.SnapLing' &&
-                    window.get_title() === 'SnapLing · 即时截图编辑' && window.is_fullscreen());
+                if (window?.get_wm_class() !== 'io.snapling.SnapLing')
+                    return true;
+                const title = window.get_title();
+                return title !== 'SnapLing · 即时截图编辑' && title !== 'SnapLing · 智能截图';
             });
         }
     }

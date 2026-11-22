@@ -7,6 +7,9 @@
 #include <QJsonObject>
 #ifndef Q_OS_WIN
 #include "platform/linux/wayland/WaylandCapture.h"
+#include <QDBusConnection>
+#include <QDBusPendingCallWatcher>
+#include <QDBusPendingReply>
 #endif
 #include <QApplication>
 #include <QClipboard>
@@ -260,7 +263,10 @@ Application::Application(QObject *p, std::unique_ptr<ICaptureBackend> captureBac
         tray.show();
     }
     applyTheme();
-    QTimer::singleShot(0, this, [this] { bindHotkeys(); });
+    QTimer::singleShot(0, this, [this] {
+        bindHotkeys();
+        configureGnomeCaptureAcceleration();
+    });
 }
 Application::~Application() {
     backend->cancel();
@@ -298,6 +304,100 @@ void Application::bindHotkeys() {
         h->bind(QKeySequence(key));
         extraHotkeys.push_back(std::move(h));
     }
+}
+void Application::configureGnomeCaptureAcceleration() {
+#ifndef Q_OS_WIN
+    auto *wayland = qobject_cast<WaylandCapture *>(backend.get());
+    const bool waylandSession = QGuiApplication::platformName().startsWith("wayland") ||
+                                qEnvironmentVariable("XDG_SESSION_TYPE") == "wayland";
+    if (!wayland || !waylandSession || !isGnomeSession())
+        return;
+
+    auto inspect = std::make_shared<std::function<void(int)>>();
+    *inspect = [this, wayland, inspect](int attempt) {
+        auto infoCall = QDBusMessage::createMethodCall("org.gnome.Shell", "/org/gnome/Shell",
+                                                       "org.gnome.Shell.Extensions", "GetExtensionInfo");
+        infoCall << QStringLiteral("snapling-no-flash@snapling.local");
+        auto *watcher =
+            new QDBusPendingCallWatcher(QDBusConnection::sessionBus().asyncCall(infoCall, 2000), this);
+        connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, wayland, inspect, attempt, watcher] {
+            const QDBusPendingReply<QVariantMap> reply = *watcher;
+            watcher->deleteLater();
+            if (reply.isError() || reply.value().isEmpty()) {
+                qInfo("gnome_fast_capture=unavailable reason=%s",
+                      qPrintable(reply.isError() ? reply.error().name() : QStringLiteral("not_installed")));
+                if (!settings.contains("capture/waylandMethod"))
+                    wayland->setMethod(WaylandCapture::Method::Screenshot);
+                return;
+            }
+            const auto info = reply.value();
+            const bool active = info.value("state").toInt() == 1;
+            const bool enabled = info.value("enabled", active).toBool();
+            const int version = info.value("version").toInt();
+            if (active && version >= 4) {
+                if (!settings.contains("capture/waylandMethod"))
+                    wayland->setMethod(WaylandCapture::Method::Compositor);
+                qInfo("gnome_fast_capture=active version=%d", version);
+                auto protocolCall = QDBusMessage::createMethodCall(
+                    "org.gnome.Shell", "/io/snapling/Screenshot",
+                    "io.snapling.Screenshot1", "GetVersion");
+                auto *protocolWatcher = new QDBusPendingCallWatcher(
+                    QDBusConnection::sessionBus().asyncCall(protocolCall, 1500), this);
+                connect(protocolWatcher, &QDBusPendingCallWatcher::finished, this,
+                        [this, protocolWatcher] {
+                            const QDBusPendingReply<uint> protocol = *protocolWatcher;
+                            protocolWatcher->deleteLater();
+                            const bool compositorMethod =
+                                settings.value("capture/waylandMethod", "compositor").toString() == "compositor";
+                            const bool hidesOwnWindows =
+                                compositorMethod && !protocol.isError() && protocol.value() >= 3;
+                            visibleWindowSettleMs = hidesOwnWindows ? 0 : 300;
+                            qInfo("gnome_fast_capture_protocol=%u own_window_mask=%d",
+                                  protocol.isError() ? 0u : protocol.value(), hidesOwnWindows);
+                        });
+                return;
+            }
+            if (info.value("state").toInt() == 4 || version < 2) {
+                qInfo("gnome_fast_capture=unsupported version=%d", version);
+                if (!settings.contains("capture/waylandMethod"))
+                    wayland->setMethod(WaylandCapture::Method::Screenshot);
+                return;
+            }
+            if (!enabled && attempt == 0) {
+                auto enableCall = QDBusMessage::createMethodCall(
+                    "org.gnome.Shell", "/org/gnome/Shell",
+                    "org.gnome.Shell.Extensions", "EnableExtension");
+                enableCall << QStringLiteral("snapling-no-flash@snapling.local");
+                auto *enableWatcher =
+                    new QDBusPendingCallWatcher(QDBusConnection::sessionBus().asyncCall(enableCall, 3000), this);
+                connect(enableWatcher, &QDBusPendingCallWatcher::finished, this,
+                        [this, wayland, enableWatcher, inspect] {
+                            const QDBusPendingReply<bool> result = *enableWatcher;
+                            enableWatcher->deleteLater();
+                            if (result.isError() || !result.value()) {
+                                qInfo("gnome_fast_capture=enable_failed reason=%s",
+                                      qPrintable(result.isError() ? result.error().name()
+                                                                  : QStringLiteral("rejected")));
+                                if (!settings.contains("capture/waylandMethod"))
+                                    wayland->setMethod(WaylandCapture::Method::Screenshot);
+                                return;
+                            }
+                            QTimer::singleShot(350, this, [inspect] { (*inspect)(1); });
+                        });
+                return;
+            }
+            if (attempt < 3) {
+                QTimer::singleShot(350, this, [inspect, attempt] { (*inspect)(attempt + 1); });
+                return;
+            }
+            qInfo("gnome_fast_capture=inactive state=%d enabled=%d version=%d",
+                  info.value("state").toInt(), enabled, version);
+            if (!settings.contains("capture/waylandMethod"))
+                wayland->setMethod(WaylandCapture::Method::Screenshot);
+        });
+    };
+    (*inspect)(0);
+#endif
 }
 void Application::show() {
     presentWindow(main);
@@ -503,9 +603,15 @@ void Application::prepareDesktopCapture(bool mainWasVisible) {
         timer->start();
         return;
     }
-    if (ownVisible)
-        scheduleCapture(120);
-    else
+    if (ownVisible) {
+        // Wayland is asynchronous: hide() updates Qt immediately, but the compositor may
+        // still have the old surface in its next capture. Flush the hide request, then
+        // allow two output frames before asking GNOME to freeze the desktop. This path only
+        // applies when a SnapLing window was visible; background hotkeys stay immediate.
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+        QGuiApplication::sync();
+        scheduleCapture(visibleWindowSettleMs);
+    } else
         beginCapture();
 }
 void Application::scheduleCapture(int milliseconds) {
@@ -589,6 +695,8 @@ void Application::showCaptureOverlays(CaptureFrame frame) {
             if (pendingOcr || pendingTranslation)
                 overlay->runOcr(pendingTranslation);
         });
+        connect(overlay, &SelectionOverlay::selectionFinalized, this,
+                [this, overlay] { closeCaptureOverlays(overlay); });
         connect(overlay, &SelectionOverlay::cancelled, this, [this, overlay] {
             closeCaptureOverlays(overlay);
             captureOverlays.clear();

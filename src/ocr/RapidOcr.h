@@ -10,6 +10,7 @@ class RapidOcr final : public IOcrEngine {
     enum class Profile { Rapid, Paddle };
     explicit RapidOcr(Profile profile = Profile::Rapid, QObject *parent = nullptr);
     static QString launcher(Profile profile);
+    static QString modelDirectory(Profile profile = Profile::Paddle);
     ~RapidOcr() override;
     void recognize(QImage image, QString modelPath, QString languages, bool cache) override;
     void cancel() override;

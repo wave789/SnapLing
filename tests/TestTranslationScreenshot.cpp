@@ -113,11 +113,15 @@ class TestTranslationScreenshot : public QObject {
         add("identifier", "kitchen_safety", {20, 190, 140, 18});
         add("filename", "CMakeLists.txt", {20, 220, 140, 18});
         add("noise", "BU RR HE", {20, 250, 140, 18}, .2);
+        add("low-confidence-valid", "Translate this label", {20, 270, 160, 18}, .3);
         add("log", "capture_ms=80 trigger_to_pixels_ms=10336", {20, 290, 320, 18});
         const auto automatic = translationUnits(lines, "简体中文", true);
-        QCOMPARE(automatic.size(), 1);
+        QCOMPARE(automatic.size(), 2);
         QCOMPARE(automatic.first().id, QString("english"));
         QCOMPARE(automatic.first().fontSize, 18);
+        QCOMPARE(automatic.at(1).id, QString("low-confidence-valid"));
+        for (const auto &unit : automatic)
+            QVERIFY(unit.id != "noise");
         const auto explicitSelection = translationUnits({lines.at(7)}, "简体中文");
         QCOMPARE(explicitSelection.size(), 1);
         const auto english = translationUnits({lines.first(), lines.at(1)}, "English", true);
@@ -278,5 +282,10 @@ class TestTranslationScreenshot : public QObject {
         QCOMPARE(session.document.render(), rendered);
     }
 };
-QTEST_MAIN(TestTranslationScreenshot)
+int main(int argc, char **argv) {
+    qputenv("SNAPLING_OCR_TEST_ENGINE", "tesseract");
+    QApplication app(argc, argv);
+    TestTranslationScreenshot test;
+    return QTest::qExec(&test, argc, argv);
+}
 #include "TestTranslationScreenshot.moc"

@@ -84,6 +84,9 @@ class TestDesktop : public QObject {
         QTest::mousePress(overlay, Qt::LeftButton, Qt::NoModifier, from);
         QTest::mouseMove(overlay, to, 40);
         QTest::mouseRelease(overlay, Qt::LeftButton, Qt::NoModifier, to);
+        QTRY_VERIFY(overlay->isSelectionReady());
+        QTest::keyClick(overlay, Qt::Key_Return);
+        QTRY_COMPARE(overlay->phase(), SelectionOverlay::Phase::QuickEditing);
         QTest::keyClick(overlay, Qt::Key_Return);
         QCOMPARE(selected.size(), 1);
         auto image = qvariant_cast<QImage>(selected[0][0]);

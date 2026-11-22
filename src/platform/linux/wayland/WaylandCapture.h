@@ -50,6 +50,7 @@ class WaylandCapture final : public ICaptureBackend {
     void portalCapture(ScreenshotPurpose purpose);
     void requestScreenshot(ScreenshotPurpose purpose);
     void selectInCompositor();
+    void openCompositorSelector();
     void lookupScreenshotPermission(std::function<void(QString own, QString host, QString error)> callback);
     void reportScreenshotFailure(ScreenshotPurpose purpose);
     void beginSharing(bool temporary);

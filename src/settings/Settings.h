@@ -15,6 +15,7 @@ class Settings {
   public:
     explicit Settings(QString file = {});
     QVariant value(QString key, QVariant fallback = {}) const;
+    bool contains(QString key) const;
     void set(QString key, QVariant value);
     ProviderConfig provider() const;
     void saveProvider(const ProviderConfig &p);

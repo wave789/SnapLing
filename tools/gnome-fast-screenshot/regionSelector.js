@@ -36,6 +36,10 @@ function sameArea(a, b) {
 }
 
 export class RegionSelector {
+    constructor(ownerPid = null) {
+        this._ownerPid = ownerPid;
+    }
+
     select() {
         if (this._operation)
             return Promise.reject(new Error('A SnapLing selection is already open'));
@@ -79,6 +83,10 @@ export class RegionSelector {
             operation.monitors = Main.layoutManager.monitors.map(({x, y, width, height}) => ({x, y, width, height}));
             if (operation.monitors.length === 0)
                 throw new Error('No monitor is available for SnapLing selection');
+            // Qt hide() and the compositor's fade-out are asynchronous. Mask every actor
+            // owned by the caller before painting the frozen desktop so neither a stale
+            // surface nor a semi-transparent closing window becomes part of the snapshot.
+            operation.hiddenActors = this._hideOwnerActors();
             operation.snapshots = await freezeDesktop(operation.monitors);
             if (this._operation !== operation)
                 return;
@@ -87,6 +95,34 @@ export class RegionSelector {
         } catch (error) {
             this._finish(operation, null, error);
         }
+    }
+
+    _hideOwnerActors() {
+        if (this._ownerPid === null)
+            return [];
+        const hidden = [];
+        for (const actor of global.get_window_actors()) {
+            const window = actor.meta_window;
+            if (!window || window.get_pid() !== this._ownerPid || !actor.visible)
+                continue;
+            hidden.push(actor);
+            actor.hide();
+        }
+        return hidden;
+    }
+
+    _restoreOwnerActors(operation) {
+        for (const actor of operation.hiddenActors ?? []) {
+            try {
+                // Qt may have completed its own hide while the selector was open. Only
+                // restore actors whose window is still logically shown.
+                if (actor.meta_window?.showing_on_its_workspace?.())
+                    actor.show();
+            } catch {
+                // The actor can be destroyed when the owning Wayland surface unmaps.
+            }
+        }
+        operation.hiddenActors = [];
     }
 
     _show(operation) {
@@ -220,6 +256,7 @@ export class RegionSelector {
         if (this._operation !== operation)
             return;
         this._operation = null;
+        this._restoreOwnerActors(operation);
 
         if (operation.paintLater)
             global.compositor.get_laters().remove(operation.paintLater);
