@@ -8,6 +8,8 @@
 
 选区出现前，GNOME Shell 只需要生成一张供合成器显示的桌面快照。松手时编码并传输选中的像素。冻结画面保留到编辑器显示首帧，随后所选屏幕继续显示冻结画面及遮罩，其他屏幕恢复实时显示。该模式依赖已启用的 GNOME 48–50 扩展和已安装的 SnapLing。源码目录直接运行的 `./tools/run.sh`、指定单屏和其他截图形状可使用系统单次截图。两种单次截图方式都无需持续屏幕共享。
 
+第 5 版会估算冻结画面所需的像素。混合缩放或错位布局能明显减少像素时，就按各屏的原生比例分别冻结。绿框和遮罩只在位置变化时更新，拖动时每帧最多更新一次。GNOME 合成器仍需在主线程绘制冻结画面，其耗时随分辨率、驱动和桌面内容变化。
+
 ## 系统单次截图提速
 
 GNOME 的单次截图 Portal 会等截图文件和闪光动画都完成，再把图片交给 SnapLing。此前的透明 CSS 只隐藏白色背景，约 500 毫秒的闪光淡出仍在运行。两个任务并行，因此缩短的时间取决于截图编码与动画的重叠程度。[GNOME 50 截图后端](https://github.com/GNOME/xdg-desktop-portal-gnome/blob/50.0/src/screenshotdialog.c#L247-L255) · [GNOME Shell 50.1 的截图和过渡](https://github.com/GNOME/gnome-shell/blob/50.1/js/ui/screenshot.js#L2668-L2684)
@@ -22,7 +24,7 @@ SnapLing 的 `.deb` 已附带提速扩展。安装后可以直接使用默认截
 extension_id='snapling-no-flash@snapling.local'
 extension_dir="${XDG_DATA_HOME:-$HOME/.local/share}/gnome-shell/extensions/$extension_id"
 install -d -- "$extension_dir"
-install -m 644 -- tools/gnome-fast-screenshot/{metadata.json,extension.js,regionSelector.js,screenshotBridge.js,stylesheet.css} "$extension_dir/"
+install -m 644 -- tools/gnome-fast-screenshot/{metadata.json,extension.js,desktopSnapshot.js,regionSelector.js,screenshotBridge.js,stylesheet.css} "$extension_dir/"
 ```
 
 已经用 `tools/install.sh` 安装的用户，可将上面命令里的 `tools/gnome-fast-screenshot` 替换成 `~/.local/snapling/share/gnome-shell/extensions/snapling-no-flash@snapling.local`。

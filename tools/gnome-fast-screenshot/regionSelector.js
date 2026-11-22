@@ -4,8 +4,7 @@ import Shell from 'gi://Shell';
 import St from 'gi://St';
 
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
-// The Shell screenshot module installs the async screenshot_stage_to_content binding.
-import 'resource:///org/gnome/shell/ui/screenshot.js';
+import {freezeDesktop, snapshotActor, snapshotAt} from './desktopSnapshot.js';
 
 const DRAG_DISTANCE = 4;
 const SHADE = 'background-color: rgba(0, 0, 0, 0.45);';
@@ -31,6 +30,11 @@ function place(actor, x, y, width, height) {
     actor.set_size(Math.max(0, width), Math.max(0, height));
 }
 
+function sameArea(a, b) {
+    return a === b || (a && b && a.x === b.x && a.y === b.y &&
+        a.width === b.width && a.height === b.height);
+}
+
 export class RegionSelector {
     select() {
         if (this._operation)
@@ -49,13 +53,13 @@ export class RegionSelector {
     cancel() {
         if (this._operation)
             this._finish(this._operation, null);
-        this._preview?.destroy();
+        this._preview?.overlay.destroy();
         this._preview = null;
     }
 
     setEditorBackdrop(actor, monitor) {
-        const preview = this._preview;
-        if (!preview || !actor.get_last_child())
+        const snapshot = this._preview?.snapshot;
+        if (!snapshot || !actor.get_last_child())
             return null;
 
         // Mutter supplies a black backdrop to translucent fullscreen surfaces.
@@ -65,27 +69,20 @@ export class RegionSelector {
             width: monitor.width, height: monitor.height,
             scale_x: 1 / transform.get_value(0, 0), scale_y: 1 / transform.get_value(1, 1),
         });
-        backdrop.add_child(new Clutter.Actor({
-            content: preview.content,
-            content_gravity: Clutter.ContentGravity.RESIZE_FILL,
-            x: -monitor.x, y: -monitor.y, width: preview.width, height: preview.height,
-        }));
+        backdrop.add_child(snapshotActor(snapshot, monitor.x, monitor.y));
         actor.insert_child_below(backdrop, actor.get_last_child());
         return backdrop;
     }
 
     async _freeze(operation) {
         try {
-            const screenshot = new Shell.Screenshot();
-            const [content, scale] = await screenshot.screenshot_stage_to_content();
+            operation.monitors = Main.layoutManager.monitors.map(({x, y, width, height}) => ({x, y, width, height}));
+            if (operation.monitors.length === 0)
+                throw new Error('No monitor is available for SnapLing selection');
+            operation.snapshots = await freezeDesktop(operation.monitors);
             if (this._operation !== operation)
                 return;
 
-            if (!content?.get_texture() || !Number.isFinite(scale) || scale <= 0)
-                throw new Error('GNOME did not provide a frozen desktop');
-
-            operation.content = content;
-            operation.scale = scale;
             this._show(operation);
         } catch (error) {
             this._finish(operation, null, error);
@@ -93,19 +90,18 @@ export class RegionSelector {
     }
 
     _show(operation) {
-        operation.monitors = Main.layoutManager.monitors.map(({x, y, width, height}) => ({x, y, width, height}));
-        if (operation.monitors.length === 0 || Main.screenshotUI.visible)
-            throw new Error('No monitor is available for SnapLing selection');
+        if (Main.screenshotUI.visible)
+            throw new Error('The desktop is not available for SnapLing selection');
 
         const overlay = new St.Widget({
             name: 'snapling-region-selector',
             reactive: true,
             can_focus: true,
-            content: operation.content,
-            content_gravity: Clutter.ContentGravity.RESIZE_FILL,
         });
         overlay.set_size(global.stage.width, global.stage.height);
         operation.overlay = overlay;
+        for (const snapshot of operation.snapshots)
+            overlay.add_child(snapshotActor(snapshot));
 
         operation.shades = Array.from({length: 4}, () => new St.Widget({style: SHADE}));
         operation.border = new St.Widget({style: 'border: 2px solid #0bd18b;'});
@@ -135,6 +131,9 @@ export class RegionSelector {
     }
 
     _paint(operation, area) {
+        if (sameArea(operation.paintedArea, area))
+            return;
+        operation.paintedArea = area;
         const [top, bottom, left, right] = operation.shades;
         const {width, height} = operation.overlay;
         if (!area) {
@@ -152,6 +151,17 @@ export class RegionSelector {
             shade.show();
         place(operation.border, area.x, area.y, area.width, area.height);
         operation.border.show();
+    }
+
+    _queuePaint(operation, area) {
+        operation.nextArea = area;
+        if (operation.paintLater || sameArea(operation.paintedArea, area))
+            return;
+        operation.paintLater = global.compositor.get_laters().add(Meta.LaterType.BEFORE_REDRAW, () => {
+            operation.paintLater = 0;
+            this._paint(operation, operation.nextArea);
+            return false;
+        });
     }
 
     _event(operation, event) {
@@ -178,7 +188,7 @@ export class RegionSelector {
         }
         case Clutter.EventType.MOTION: {
             const [x, y] = event.get_coords();
-            this._paint(operation, this._areaAt(operation, x, y));
+            this._queuePaint(operation, this._areaAt(operation, x, y));
             break;
         }
         case Clutter.EventType.BUTTON_RELEASE: {
@@ -186,10 +196,12 @@ export class RegionSelector {
                 break;
             const [x, y] = event.get_coords();
             const area = this._areaAt(operation, x, y);
+            const snapshot = snapshotAt(operation.snapshots, operation.monitor);
             this._paint(operation, area);
-            this._finish(operation, {
-                content: operation.content, scale: operation.scale, area, monitor: operation.monitor,
-            });
+            if (snapshot)
+                this._finish(operation, {snapshot, area, monitor: operation.monitor});
+            else
+                this._finish(operation, null, new Error('No frozen image covers the selection'));
             break;
         }
         }
@@ -209,13 +221,15 @@ export class RegionSelector {
             return;
         this._operation = null;
 
+        if (operation.paintLater)
+            global.compositor.get_laters().remove(operation.paintLater);
         if (operation.grab)
             Main.popModal(operation.grab);
         if (operation.displayCursorChanged)
             global.display.set_cursor(Meta.Cursor.DEFAULT);
         if (result) {
-            this._preview = operation.overlay;
-            this._preview.reactive = false;
+            operation.overlay.reactive = false;
+            this._preview = {overlay: operation.overlay, snapshot: result.snapshot};
         } else {
             operation.overlay?.destroy();
         }

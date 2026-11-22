@@ -57,7 +57,7 @@ function canCapture() {
 }
 
 async function writeCrop(selection, stream) {
-    const {content, scale, area, monitor} = selection;
+    const {snapshot: {bounds: source, content, scale}, area, monitor} = selection;
     const localX = area.x - monitor.x;
     const localY = area.y - monitor.y;
     const bounds = [monitor.x, monitor.y, monitor.width, monitor.height,
@@ -66,10 +66,10 @@ async function writeCrop(selection, stream) {
         throw new Error('invalid selection');
 
     const texture = content.get_texture();
-    const x = Math.round(area.x * scale);
-    const y = Math.round(area.y * scale);
-    const w = Math.round((area.x + area.width) * scale) - x;
-    const h = Math.round((area.y + area.height) * scale) - y;
+    const x = Math.round((area.x - source.x) * scale);
+    const y = Math.round((area.y - source.y) * scale);
+    const w = Math.round((area.x + area.width - source.x) * scale) - x;
+    const h = Math.round((area.y + area.height - source.y) * scale) - y;
     if (localX < 0 || localY < 0 || area.width <= 0 || area.height <= 0 ||
         localX + area.width > monitor.width || localY + area.height > monitor.height ||
         x < 0 || y < 0 || w <= 0 || h <= 0 || w * h > 100_000_000 ||
