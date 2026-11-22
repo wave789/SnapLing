@@ -1,4 +1,5 @@
 #include "TranslationProvider.h"
+#include "platform/SecretStore.h"
 #include <QCryptographicHash>
 #include <QDateTime>
 #include <QElapsedTimer>
@@ -324,8 +325,11 @@ void BaiduTranslationProvider::translate(QVector<TranslationUnit> units, Provide
         emit failed("当前目标语言无法映射为百度翻译语言代码");
         return;
     }
-    const auto environmentSecret = qEnvironmentVariable(cfg.keyEnv.toUtf8().constData());
-    const auto secret = environmentSecret.isEmpty() ? cfg.sessionKey : environmentSecret;
+    auto secret = cfg.sessionKey.trimmed();
+    if (secret.isEmpty())
+        secret = SecretStore::loadBaiduTranslationSecret(cfg.appId);
+    if (secret.isEmpty())
+        secret = qEnvironmentVariable(cfg.keyEnv.toUtf8().constData()).trimmed();
     if (cfg.appId.trimmed().isEmpty() || secret.isEmpty()) {
         emit failed("请填写百度翻译 AppID 和密钥，或设置密钥环境变量");
         return;
@@ -338,6 +342,7 @@ void BaiduTranslationProvider::translate(QVector<TranslationUnit> units, Provide
         return;
     }
     cancelled = requestFailed = false;
+    cfg.sessionKey = secret;
     allUnits = std::move(units);
     translated.clear();
     translated.reserve(allUnits.size());
@@ -358,8 +363,7 @@ void BaiduTranslationProvider::sendNext() {
         return;
     }
     const QString appId = activeConfig.appId.trimmed();
-    const auto environmentSecret = qEnvironmentVariable(activeConfig.keyEnv.toUtf8().constData());
-    const QString secret = environmentSecret.isEmpty() ? activeConfig.sessionKey : environmentSecret;
+    const QString secret = activeConfig.sessionKey;
     QVector<TranslationUnit> batch;
     QStringList raw;
     int bytes = 0;

@@ -256,9 +256,13 @@ SettingsDialog::SettingsDialog(Settings &s, ProviderConfig &runtime, QWidget *pa
     appId->setObjectName("baiduAppId");
     appId->setPlaceholderText("百度翻译控制台中的 AppID");
     secret->setEchoMode(QLineEdit::Password);
-    secret->setPlaceholderText("保存时写入系统密钥环；也可使用 BAIDU_TRANSLATE_SECRET_KEY");
+    secret->setPlaceholderText("保存到系统密钥环；留空可使用已保存密钥或环境变量");
     if (runtime.backend == TranslationBackend::BaiduGeneral && secret->text().isEmpty())
-        secret->setText(SecretStore::load(SecretStore::baiduTranslationCredential()));
+        secret->setText(SecretStore::loadBaiduTranslationSecret(runtime.appId));
+    connect(appId, &QLineEdit::textEdited, this, [=] {
+        if (!secret->isModified())
+            secret->setText(SecretStore::loadBaiduTranslationSecret(appId->text()));
+    });
     ai->addRow("名称", name);
     ai->addRow("Base URL", url);
     ai->addRow("模型", model);
@@ -310,15 +314,16 @@ SettingsDialog::SettingsDialog(Settings &s, ProviderConfig &runtime, QWidget *pa
                 env->setText("BAIDU_TRANSLATE_SECRET_KEY");
             if (language->text().trimmed().isEmpty())
                 language->setText("简体中文");
-            if (secret->text().isEmpty())
-                secret->setText(SecretStore::load(SecretStore::baiduTranslationCredential()));
+            secret->setText(SecretStore::loadBaiduTranslationSecret(appId->text()));
         } else if (index == 0) {
+            secret->clear();
             name->setText("本地 Ollama");
             url->setText("http://127.0.0.1:11434/v1");
             model->setText("qwen3.5:4b");
             env->setText("SNAPLING_API_KEY");
             disableThinking->setChecked(true);
         } else {
+            secret->clear();
             name->setText("OpenAI 兼容服务");
             url->clear();
             model->clear();
@@ -341,7 +346,7 @@ SettingsDialog::SettingsDialog(Settings &s, ProviderConfig &runtime, QWidget *pa
                        ? QStringLiteral("BAIDU_TRANSLATE_SECRET_KEY")
                        : env->text().trimmed();
         p.appId = appId->text().trimmed();
-        p.sessionKey = secret->text();
+        p.sessionKey = p.backend == TranslationBackend::BaiduGeneral ? secret->text().trimmed() : secret->text();
         p.targetLanguage = language->text().trimmed();
         p.timeoutSeconds = timeout->value();
         p.maxTokens = tokens->value();
@@ -393,8 +398,8 @@ SettingsDialog::SettingsDialog(Settings &s, ProviderConfig &runtime, QWidget *pa
         applyBackendVisibility();
         secret->clear();
         if (backend == TranslationBackend::BaiduGeneral) {
-            secret->setText(SecretStore::load(SecretStore::baiduTranslationCredential()));
-            secret->setPlaceholderText("已从系统密钥环读取；留空则不修改已保存密钥");
+            secret->setText(SecretStore::loadBaiduTranslationSecret(o["appId"].toString()));
+            secret->setPlaceholderText("留空则不修改已保存密钥");
         }
     });
     auto *profileButtons = new QWidget;
@@ -405,12 +410,17 @@ SettingsDialog::SettingsDialog(Settings &s, ProviderConfig &runtime, QWidget *pa
     profileRow->addWidget(remember);
     profileRow->addWidget(forget);
     ai->addRow(profileButtons);
-    connect(remember, &QPushButton::clicked, this, [=] {
+    connect(remember, &QPushButton::clicked, this, [=, this] {
         auto p = config();
         if (p.name.isEmpty())
             return;
-        if (p.backend == TranslationBackend::BaiduGeneral && !p.sessionKey.isEmpty())
-            SecretStore::store(SecretStore::baiduTranslationCredential(), p.sessionKey);
+        if (p.backend == TranslationBackend::BaiduGeneral && !p.sessionKey.isEmpty()) {
+            QString error;
+            if (!SecretStore::store(SecretStore::baiduTranslationCredential(p.appId), p.sessionKey, &error)) {
+                QMessageBox::warning(this, "密钥未保存", error);
+                return;
+            }
+        }
         QJsonObject o{{"backend", translationBackendId(p.backend)},
                       {"preset", preset->currentIndex()},
                       {"name", p.name},
@@ -456,14 +466,13 @@ SettingsDialog::SettingsDialog(Settings &s, ProviderConfig &runtime, QWidget *pa
             }
             const auto environmentSecret =
                 qEnvironmentVariable(candidate.keyEnv.toUtf8().constData());
-            if (candidate.sessionKey.isEmpty() && environmentSecret.isEmpty()) {
+            if (candidate.sessionKey.isEmpty() && environmentSecret.isEmpty() &&
+                SecretStore::loadBaiduTranslationSecret(candidate.appId).isEmpty()) {
                 QMessageBox::warning(this, "百度翻译",
                                      "百度密钥为空，请填写“密钥”，或设置环境变量 "
                                      "BAIDU_TRANSLATE_SECRET_KEY。");
                 return;
             }
-            if (!candidate.sessionKey.isEmpty())
-                SecretStore::store(SecretStore::baiduTranslationCredential(), candidate.sessionKey);
             TranslationUnit unit;
             unit.id = "connection-test";
             unit.source = "Hello";
@@ -485,8 +494,9 @@ SettingsDialog::SettingsDialog(Settings &s, ProviderConfig &runtime, QWidget *pa
     connect(baiduProvider, &ITranslationProvider::failed, this,
             [this](QString message) { QMessageBox::warning(this, "连接测试", message); });
     auto *privacy =
-        new QLabel("供应商类型和百度 AppID 会保存；百度密钥写入系统密钥环，不写入普通配置文件。"
-                   "也可使用环境变量覆盖。截图文本仅在主动翻译时发送到所选服务。");
+        new QLabel("供应商类型和百度 AppID 会保存；百度密钥按 AppID 写入系统密钥环。"
+                   "使用当前填写的密钥，其次使用已保存密钥；均为空时读取环境变量。"
+                   "截图文本仅在主动翻译时发送到所选服务。");
     privacy->setWordWrap(true);
     ai->addRow(privacy);
     auto *performance = page("性能");
@@ -517,6 +527,15 @@ SettingsDialog::SettingsDialog(Settings &s, ProviderConfig &runtime, QWidget *pa
                     QMessageBox::warning(this, "颜色无效", "请输入有效的背景颜色");
                     return;
                 }
+                const auto candidate = config();
+                if (candidate.backend == TranslationBackend::BaiduGeneral && !candidate.sessionKey.isEmpty()) {
+                    QString error;
+                    if (!SecretStore::store(SecretStore::baiduTranslationCredential(candidate.appId),
+                                            candidate.sessionKey, &error)) {
+                        QMessageBox::warning(this, "密钥未保存", error);
+                        return;
+                    }
+                }
                 if (startup->isChecked() != s.value("general/startup", false).toBool()) {
                     QString error;
                     if (!Autostart::setEnabled(startup->isChecked(), error)) {
@@ -529,10 +548,7 @@ SettingsDialog::SettingsDialog(Settings &s, ProviderConfig &runtime, QWidget *pa
                 for (auto it = extraKeys->cbegin(); it != extraKeys->cend(); ++it)
                     s.set("hotkey/" + it.key(),
                           it.value()->keySequence().toString(QKeySequence::PortableText));
-                runtime = config();
-                if (runtime.backend == TranslationBackend::BaiduGeneral &&
-                    !runtime.sessionKey.isEmpty())
-                    SecretStore::store(SecretStore::baiduTranslationCredential(), runtime.sessionKey);
+                runtime = candidate;
                 s.saveProvider(runtime);
                 s.set("general/theme", theme->currentIndex());
                 s.set("capture/waylandMethod", captureMethod->currentData());

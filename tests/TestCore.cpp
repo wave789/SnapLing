@@ -46,6 +46,26 @@ using namespace SnapLing;
 class TestCore : public QObject {
     Q_OBJECT
   private:
+    static bool installSecretTool(const QTemporaryDir &directory) {
+        QFile tool(directory.filePath("secret-tool"));
+        if (!tool.open(QIODevice::WriteOnly))
+            return false;
+        const auto script = QString(
+            "#!/bin/sh\n"
+            "state='%1'\n"
+            "[ ! -f \"$state/fail-keyring\" ] || exit 1\n"
+            "for attribute do credential=\"$attribute\"; done\n"
+            "case \"$1\" in\n"
+            "  store) cat > \"$state/$credential\" ;;\n"
+            "  lookup) [ -f \"$state/$credential\" ] && cat \"$state/$credential\" ;;\n"
+            "  clear) rm -f \"$state/$credential\" ;;\n"
+            "esac\n").arg(directory.path());
+        if (tool.write(script.toUtf8()) != script.toUtf8().size())
+            return false;
+        tool.close();
+        return QFile::setPermissions(tool.fileName(), QFileDevice::ReadOwner | QFileDevice::WriteOwner |
+                                                       QFileDevice::ExeOwner);
+    }
     static QImage sample() {
         QImage i(160, 100, QImage::Format_ARGB32_Premultiplied);
         i.fill(Qt::white);
@@ -405,7 +425,34 @@ class TestCore : public QObject {
         QCOMPARE(BaiduTranslationProvider::languageCode("English"), QString("en"));
         QCOMPARE(BaiduTranslationProvider::languageCode("日语"), QString("jp"));
     }
+    void baiduRequestSigningAndTranslation_data() {
+        QTest::addColumn<QString>("credentialSource");
+        QTest::newRow("entered-key-over-stale-environment") << "entered";
+        QTest::newRow("saved-key-after-settings-reload") << "saved";
+        QTest::newRow("environment-without-saved-key") << "environment";
+    }
     void baiduRequestSigningAndTranslation() {
+        QFETCH(QString, credentialSource);
+        QTemporaryDir tmp;
+#ifdef Q_OS_WIN
+        if (credentialSource == "saved")
+            QSKIP("系统密钥环测试使用 Linux secret-tool");
+#else
+        QVERIFY(installSecretTool(tmp));
+#endif
+        const auto oldPath = qgetenv("PATH");
+        const auto oldEnvironment = qgetenv("SNAPLING_TEST_BAIDU_KEY");
+        const auto restore = qScopeGuard([oldPath, oldEnvironment] {
+            qputenv("PATH", oldPath);
+            if (oldEnvironment.isNull())
+                qunsetenv("SNAPLING_TEST_BAIDU_KEY");
+            else
+                qputenv("SNAPLING_TEST_BAIDU_KEY", oldEnvironment);
+        });
+#ifndef Q_OS_WIN
+        qputenv("PATH", (tmp.path() + ":" + QString::fromUtf8(oldPath)).toUtf8());
+#endif
+        qputenv("SNAPLING_TEST_BAIDU_KEY", credentialSource == "environment" ? "secret-key" : "stale-key");
         QTcpServer server;
         QVERIFY(server.listen(QHostAddress::LocalHost));
         QString signatureError;
@@ -451,8 +498,16 @@ class TestCore : public QObject {
         config.backend = TranslationBackend::BaiduGeneral;
         config.baseUrl = QString("http://127.0.0.1:%1/translate").arg(server.serverPort());
         config.appId = "app-id";
-        config.keyEnv.clear();
-        config.sessionKey = "secret-key";
+        config.keyEnv = "SNAPLING_TEST_BAIDU_KEY";
+        if (credentialSource == "entered")
+            config.sessionKey = "secret-key";
+        if (credentialSource == "saved") {
+            QVERIFY(SecretStore::store(SecretStore::baiduTranslationCredential(config.appId), "secret-key"));
+            Settings settings(tmp.filePath("restart.ini"));
+            settings.saveProvider(config);
+            config = Settings(settings.fileName()).provider();
+            QVERIFY(config.sessionKey.isEmpty());
+        }
         config.targetLanguage = "简体中文";
         BaiduTranslationProvider provider;
         QSignalSpy done(&provider, &ITranslationProvider::completed);
@@ -613,7 +668,14 @@ class TestCore : public QObject {
         QCOMPARE(settings.value("hotkey/capture").toString(), QString("Ctrl+Shift+F8"));
     }
     void baiduProviderCanBeSavedWithoutPersistingSecret() {
+#ifdef Q_OS_WIN
+        QSKIP("系统密钥环测试使用 Linux secret-tool");
+#endif
         QTemporaryDir tmp;
+        QVERIFY(installSecretTool(tmp));
+        const auto oldPath = qEnvironmentVariable("PATH");
+        const auto restore = qScopeGuard([oldPath] { qputenv("PATH", oldPath.toUtf8()); });
+        qputenv("PATH", (tmp.path() + ":" + oldPath).toUtf8());
         Settings settings(tmp.filePath("settings.ini"));
         ProviderConfig config;
         SettingsDialog dialog(settings, config);
@@ -654,26 +716,66 @@ class TestCore : public QObject {
         QCOMPARE(config.sessionKey, QString("session-secret"));
         QCOMPARE(Settings(tmp.filePath("settings.ini")).provider().appId, QString("saved-app-id"));
         QVERIFY(Settings(tmp.filePath("settings.ini")).provider().sessionKey.isEmpty());
+        auto restored = Settings(tmp.filePath("settings.ini")).provider();
+        SettingsDialog restarted(settings, restored);
+        QCOMPARE(restarted.findChild<QLineEdit *>("translationSecret")->text(), QString("session-secret"));
+        QVERIFY(SecretStore::store(SecretStore::baiduTranslationCredential("another-app"), "another-secret"));
+        QCOMPARE(SecretStore::loadBaiduTranslationSecret("saved-app-id"), QString("session-secret"));
+        QCOMPARE(SecretStore::loadBaiduTranslationSecret("another-app"), QString("another-secret"));
+    }
+    void baiduSaveFailureKeepsDialogOpenAndPreservesSettings() {
+#ifdef Q_OS_WIN
+        QSKIP("系统密钥环测试使用 Linux secret-tool");
+#endif
+        QTemporaryDir tmp;
+        QVERIFY(installSecretTool(tmp));
+        const auto oldPath = qgetenv("PATH");
+        const auto restore = qScopeGuard([oldPath] { qputenv("PATH", oldPath); });
+        qputenv("PATH", (tmp.path() + ":" + QString::fromUtf8(oldPath)).toUtf8());
+        QFile lock(tmp.filePath("fail-keyring"));
+        QVERIFY(lock.open(QIODevice::WriteOnly));
+        lock.close();
+        QString error;
+        QVERIFY(!SecretStore::store(SecretStore::baiduTranslationCredential("app"), "new-secret", &error));
+        QVERIFY(!error.isEmpty());
+
+        Settings settings(tmp.filePath("settings.ini"));
+        ProviderConfig config;
+        settings.saveProvider(config);
+        SettingsDialog dialog(settings, config);
+        auto *backend = dialog.findChild<QComboBox *>("translationBackend");
+        const int index = backend->findData(int(TranslationBackend::BaiduGeneral));
+        backend->setCurrentIndex(index);
+        QVERIFY(QMetaObject::invokeMethod(backend, "activated", Qt::DirectConnection, Q_ARG(int, index)));
+        dialog.findChild<QLineEdit *>("baiduAppId")->setText("app");
+        dialog.findChild<QLineEdit *>("translationSecret")->setText("new-secret");
+        dialog.show();
+        QString warning;
+        QTimer dismiss;
+        connect(&dismiss, &QTimer::timeout, this, [&] {
+            for (auto *widget : QApplication::topLevelWidgets())
+                if (auto *message = qobject_cast<QMessageBox *>(widget)) {
+                    warning = message->text();
+                    message->accept();
+                }
+        });
+        dismiss.start(20);
+        dialog.findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Save)->click();
+        QVERIFY(!warning.isEmpty());
+        QVERIFY(dialog.isVisible());
+        QCOMPARE(config.backend, TranslationBackend::OpenAiCompatible);
+        QCOMPARE(Settings(settings.fileName()).provider().backend, TranslationBackend::OpenAiCompatible);
+        QVERIFY(QFile::remove(lock.fileName()));
+        dialog.findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Save)->click();
+        QCOMPARE(dialog.result(), int(QDialog::Accepted));
+        QCOMPARE(SecretStore::loadBaiduTranslationSecret("app"), QString("new-secret"));
     }
     void systemCredentialStoreRoundTrip() {
+#ifdef Q_OS_WIN
+        QSKIP("系统密钥环测试使用 Linux secret-tool");
+#endif
         QTemporaryDir tmp;
-        const auto state = tmp.filePath("stored-secret");
-        QFile tool(tmp.filePath("secret-tool"));
-        QVERIFY(tool.open(QIODevice::WriteOnly));
-        const auto script =
-            QString("#!/bin/sh\n"
-                    "state='%1'\n"
-                    "case \"$1\" in\n"
-                    "  store) cat > \"$state\" ;;\n"
-                    "  lookup) [ -f \"$state\" ] && cat \"$state\" ;;\n"
-                    "  clear) rm -f \"$state\" ;;\n"
-                    "esac\n")
-                .arg(state);
-        QCOMPARE(tool.write(script.toUtf8()), qint64(script.toUtf8().size()));
-        tool.close();
-        QVERIFY(QFile::setPermissions(tmp.filePath("secret-tool"),
-                                      QFileDevice::ReadOwner | QFileDevice::WriteOwner |
-                                          QFileDevice::ExeOwner));
+        QVERIFY(installSecretTool(tmp));
         const auto oldPath = qEnvironmentVariable("PATH");
         const auto restore = qScopeGuard([oldPath] { qputenv("PATH", oldPath.toUtf8()); });
         qputenv("PATH", (tmp.path() + ":" + oldPath).toUtf8());
@@ -692,24 +794,11 @@ class TestCore : public QObject {
         QVERIFY(SecretStore::load("test-key").isEmpty());
     }
     void baiduTranslationLoadsKeyringAfterRestart() {
+#ifdef Q_OS_WIN
+        QSKIP("系统密钥环测试使用 Linux secret-tool");
+#endif
         QTemporaryDir tmp;
-        const auto state = tmp.filePath("stored-secret");
-        QFile tool(tmp.filePath("secret-tool"));
-        QVERIFY(tool.open(QIODevice::WriteOnly));
-        const auto script =
-            QString("#!/bin/sh\n"
-                    "state='%1'\n"
-                    "case \"$1\" in\n"
-                    "  store) cat > \"$state\" ;;\n"
-                    "  lookup) [ -f \"$state\" ] && cat \"$state\" ;;\n"
-                    "  clear) rm -f \"$state\" ;;\n"
-                    "esac\n")
-                .arg(state);
-        QCOMPARE(tool.write(script.toUtf8()), qint64(script.toUtf8().size()));
-        tool.close();
-        QVERIFY(QFile::setPermissions(tmp.filePath("secret-tool"),
-                                      QFileDevice::ReadOwner | QFileDevice::WriteOwner |
-                                          QFileDevice::ExeOwner));
+        QVERIFY(installSecretTool(tmp));
         const auto oldPath = qEnvironmentVariable("PATH");
         const auto oldSecret = qEnvironmentVariable("BAIDU_TRANSLATE_SECRET_KEY");
         const auto restore = qScopeGuard([oldPath, oldSecret] {

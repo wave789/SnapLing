@@ -87,12 +87,15 @@ SelectionOverlay::SelectionOverlay(CaptureFrame f, CaptureMode m, QWidget *paren
                        .normalized()
                        .intersected(frame.image.rect());
         selectionReady = !selected.isEmpty();
-        if (selectionReady)
+        if (selectionReady) {
+            // Build the selected image and toolbar before the Wayland surface can map.
+            prepareQuickEditor();
             QTimer::singleShot(0, this, [this] {
                 if (selectionReady && currentPhase == Phase::Selecting) {
                     finishSelection();
                 }
             });
+        }
     }
     present(std::move(activationToken), activate);
     if (!anchoredSelection && !frame.fullMonitorImage &&

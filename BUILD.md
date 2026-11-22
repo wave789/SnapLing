@@ -54,6 +54,8 @@ Ubuntu GNOME Wayland 默认通过随包扩展在合成器内即时框选，扩�
 
 DEB 同时安装 GNOME 即时框选扩展和完整 PaddleOCR 运行环境。应用启动时会尝试启用扩展；首次安装或升级扩展后注销并重新登录一次，让 GNOME 加载新代码。之后主截图快捷键默认立即显示选区，扩展失效时自动回退。新系统安装 DEB 时使用 `apt install ./<安装包>.deb`，让 apt 一并处理 Qt 等系统依赖。
 
+百度密钥持久保存依赖 `libsecret-tools` 和当前登录会话中已解锁的 GNOME Keyring。保存时若密钥环不可用，设置窗口会显示原因并保留输入。修复或解锁密钥环后重新点击「保存」即可，随后按 AppID 读取已保存密钥。当前填写和已保存密钥均为空时，使用 `BAIDU_TRANSLATE_SECRET_KEY`。
+
 从源码运行或用户安装切换到 DEB 时，GNOME 可能会优先使用旧的用户桌面入口。可先退出正在运行的 SnapLing，再执行 `/usr/bin/snapling` 打开包内版本。
 
 **ABI 基线取决于构建机。** Ubuntu 26.04 包不承诺运行于 24.04；面向 24.04 的包应在 24.04 构建并再测试 26.04。AppImage 同样不能自动解决新 glibc 依赖。

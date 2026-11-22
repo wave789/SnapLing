@@ -187,9 +187,8 @@ void EditorSession::startTranslation() {
         notify("没有可翻译的文字，请调整选区后重新 OCR。", true);
         return;
     }
-    if (config.backend == TranslationBackend::BaiduGeneral && config.sessionKey.isEmpty() &&
-        qEnvironmentVariable(config.keyEnv.toUtf8().constData()).isEmpty()) {
-        config.sessionKey = SecretStore::load(SecretStore::baiduTranslationCredential());
+    if (config.backend == TranslationBackend::BaiduGeneral && config.sessionKey.isEmpty()) {
+        config.sessionKey = SecretStore::loadBaiduTranslationSecret(config.appId);
         qInfo("baidu_keyring_loaded=%d", !config.sessionKey.isEmpty());
     }
     requestConfig = config;

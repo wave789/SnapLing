@@ -37,8 +37,9 @@ function sameArea(a, b) {
 }
 
 export class RegionSelector {
-    constructor(ownerPid = null) {
+    constructor(ownerPid = null, prepareMonitor = null) {
         this._ownerPid = ownerPid;
+        this._prepareMonitor = prepareMonitor;
     }
 
     select() {
@@ -109,15 +110,18 @@ export class RegionSelector {
                 // After the first output is visible its shades are part of the stage.
                 // Temporarily remove the selector before freezing later outputs so the
                 // dark selection mask is not baked into their frozen textures.
-                const hideSelector = index > 0;
-                if (hideSelector)
-                    operation.overlay.hide();
+                const captureLayers = [operation.snapshotLayer, operation.dim,
+                    operation.selectionPatch, operation.border];
+                const visibleLayers = index > 0 ? captureLayers.filter(actor => actor.visible) : [];
+                for (const actor of visibleLayers)
+                    actor.hide();
                 let snapshots;
                 try {
                     snapshots = await freezeMonitor(ordered[index]);
                 } finally {
                     if (this._operation === operation && !operation.cancelled)
-                        operation.overlay.show();
+                        for (const actor of visibleLayers)
+                            actor.show();
                 }
                 if (this._operation !== operation || operation.cancelled)
                     return;
@@ -126,6 +130,7 @@ export class RegionSelector {
                     operation.snapshotLayer.add_child(snapshotActor(snapshot));
                 }
                 operation.hasSnapshot = true;
+                operation.paintedArea = undefined;
                 const [x, y] = global.get_pointer();
                 this._paint(operation, monitorAt(operation.monitors, x, y));
                 this._applyPendingSelection(operation);
@@ -242,10 +247,16 @@ export class RegionSelector {
         }
         const monitor = monitorAt(operation.monitors, area.x + 1, area.y + 1);
         const snapshot = monitor ? snapshotAt(operation.snapshots, monitor) : null;
-        operation.selectionPatch.remove_all_children();
         if (snapshot) {
+            this._prepareMonitor?.(snapshot, monitor);
             place(operation.selectionPatch, area.x, area.y, area.width, area.height);
-            operation.selectionPatch.add_child(snapshotActor(snapshot, area.x, area.y));
+            if (operation.patchSnapshot !== snapshot) {
+                operation.selectionPatch.destroy_all_children();
+                operation.patchContent = snapshotActor(snapshot);
+                operation.selectionPatch.add_child(operation.patchContent);
+                operation.patchSnapshot = snapshot;
+            }
+            operation.patchContent.set_position(snapshot.bounds.x - area.x, snapshot.bounds.y - area.y);
             operation.selectionPatch.show();
         } else {
             operation.selectionPatch.hide();
@@ -325,6 +336,7 @@ export class RegionSelector {
         if (!snapshot)
             return;
         operation.pendingSelection = null;
+        this._paint(operation, pending.area);
         this._finish(operation, {snapshot, area: pending.area, monitor: pending.monitor});
     }
 
@@ -335,6 +347,15 @@ export class RegionSelector {
         operation.cancelled = true;
         this._restoreOwnerActors(operation);
 
+        if (result) {
+            this._paint(operation, result.area);
+            const area = result.area;
+            const left = Math.max(1, area.x - 1);
+            const top = Math.max(1, area.y - 1);
+            const right = Math.min(operation.overlay.width - 1, area.x + area.width + 1);
+            const bottom = Math.min(operation.overlay.height - 1, area.y + area.height + 1);
+            place(operation.border, left, top, right - left, bottom - top);
+        }
         if (operation.paintLater)
             global.compositor.get_laters().remove(operation.paintLater);
         if (operation.grab)
