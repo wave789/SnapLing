@@ -43,6 +43,21 @@ static bool isGnomeDesktop() {
 static QDBusMessage compositorCall(const QString &method) {
     return QDBusMessage::createMethodCall("org.gnome.Shell", "/io/snapling/Screenshot", compositorInterface, method);
 }
+static QImage readCompositorImage(const QDBusUnixFileDescriptor &fd) {
+    struct stat info {};
+    if (fstat(fd.fileDescriptor(), &info) != 0 || !S_ISREG(info.st_mode) ||
+        info.st_size <= 0 || info.st_size > 512 * 1024 * 1024)
+        return {};
+    // A new open file description keeps prefetch reads independent from the sender's seeks.
+    QFile file(QString("/proc/self/fd/%1").arg(fd.fileDescriptor()));
+    if (!file.open(QIODevice::ReadOnly))
+        return {};
+    QString error;
+    auto image = WaylandCapture::decodeCaptureImage(file, error);
+    if (image.isNull())
+        qWarning("gnome_handoff_decode_error=%s", qPrintable(error));
+    return image;
+}
 QImage WaylandCapture::decodeCaptureImage(QIODevice &device, QString &error) {
     auto data = device.readAll();
     static const QByteArray magic("SNRAW1");
@@ -115,6 +130,8 @@ WaylandCapture::WaylandCapture(QObject *p, StreamFactory factory, ScreenProvider
                                    ? configured.toString()
                                    : (isGnomeDesktop() ? QStringLiteral("compositor") : QStringLiteral("screenshot")));
     frameTimer.setInterval(20);
+    QDBusConnection::sessionBus().connect("org.gnome.Shell", "/io/snapling/Screenshot",
+        compositorInterface, "Cancelled", this, SLOT(compositorCancelled()));
     connect(&frameTimer, &QTimer::timeout, this, &WaylandCapture::deliverFrame);
     auto changed = [this] {
         QSettings().remove(restoreKey);
@@ -162,7 +179,7 @@ void WaylandCapture::setMethod(Method value) {
     compositorProtocol = -1;
 }
 void WaylandCapture::cancel() {
-    if (temporarySharing || starting || request || resettingPermission || compositorPending)
+    if (temporarySharing || starting || request || resettingPermission || compositorPending || awaitingEditorReady)
         resetSharing();
     else {
         ++generation;
@@ -401,9 +418,82 @@ void WaylandCapture::selectInCompositor() {
         openCompositorSelector();
     });
 }
+const CaptureScreen *WaylandCapture::compositorScreen(const QRectF &monitor) const {
+    QRectF desktop;
+    for (const auto &screen : layout)
+        desktop = desktop.united(screen.desktop);
+    for (const auto &screen : layout)
+        if (screen.desktop == monitor)
+            return &screen;
+    for (const auto &screen : layout)
+        if (screen.desktop.translated(-desktop.topLeft()) == monitor)
+            return &screen;
+    return nullptr;
+}
+void WaylandCapture::prepareCompositorMonitor() {
+    const auto job = generation;
+    auto *call = new QDBusPendingCallWatcher(
+        QDBusConnection::sessionBus().asyncCall(compositorCall("PrepareMonitor"), 100000), this);
+    connect(call, &QDBusPendingCallWatcher::finished, this, [this, job, call] {
+        const auto reply = call->reply();
+        call->deleteLater();
+        if (job != generation || reply.type() != QDBusMessage::ReplyMessage)
+            return;
+        const auto args = reply.arguments();
+        if (reply.signature() != "hiiii" || args.size() != 5)
+            return;
+        const auto fd = qvariant_cast<QDBusUnixFileDescriptor>(args[0]);
+        const QRectF monitor(args[1].toInt(), args[2].toInt(), args[3].toInt(), args[4].toInt());
+        const auto *screen = compositorScreen(monitor);
+        if (!fd.isValid() || !screen || !sameLayout(layout, currentScreens()))
+            return;
+
+        CaptureFrame frame;
+        frame.desktop = screen->desktop;
+        frame.screenName = screen->name;
+        frame.fullMonitorImage = true;
+        preparedMonitor = monitor;
+        preparedPixels = QtConcurrent::run(&workerPool, [fd] { return readCompositorImage(fd); });
+        auto *reader = new QFutureWatcher<QImage>(this);
+        connect(reader, &QFutureWatcher<QImage>::finished, this, [this, job, reader, frame]() mutable {
+            frame.image = reader->result();
+            reader->deleteLater();
+            if (job != generation || compositorFinalReceived || !capturePending || frame.image.isNull() ||
+                !sameLayout(layout, currentScreens()))
+                return;
+            qInfo("gnome_monitor_prepared pixels=%dx%d screen=%s", frame.image.width(), frame.image.height(),
+                  qPrintable(frame.screenName));
+            emit monitorPrepared(std::move(frame));
+        });
+        reader->setFuture(preparedPixels);
+    });
+}
+void WaylandCapture::compositorEditorReady() {
+    if (!awaitingEditorReady)
+        return;
+    const auto job = generation;
+    auto *call = new QDBusPendingCallWatcher(
+        QDBusConnection::sessionBus().asyncCall(compositorCall("EditorReady"), 2500), this);
+    connect(call, &QDBusPendingCallWatcher::finished, this, [this, call, job] {
+        call->deleteLater();
+        if (job == generation) {
+            awaitingEditorReady = false;
+            emit compositorInputReady();
+        }
+    });
+}
+void WaylandCapture::compositorCancelled() {
+    if (!compositorPending && !awaitingEditorReady)
+        return;
+    resetSharing();
+    emit compositorSelectionCancelled();
+}
 void WaylandCapture::openCompositorSelector() {
     const auto job = generation;
     compositorPending = true;
+    compositorFinalReceived = false;
+    preparedMonitor = {};
+    preparedPixels = {};
     qInfo("capture_backend=gnome_compositor screens=%lld", qlonglong(layout.size()));
     auto *call = new QDBusPendingCallWatcher(
         QDBusConnection::sessionBus().asyncCall(compositorCall("SelectRegion"), 100000), this);
@@ -441,6 +531,7 @@ void WaylandCapture::openCompositorSelector() {
             }
             return;
         }
+        compositorFinalReceived = true;
 
         const auto args = reply.arguments();
         if (reply.signature() != "hiiiiiiii" || args.size() != 9) {
@@ -455,22 +546,7 @@ void WaylandCapture::openCompositorSelector() {
             failSharing("无法匹配 GNOME 返回的选区，请检查显示器连接并重新截图。");
             return;
         }
-        QRectF desktop;
-        for (const auto &screen : layout)
-            desktop = desktop.united(screen.desktop);
-        const CaptureScreen *output = nullptr;
-        for (const auto &screen : layout)
-            if (screen.desktop == monitor) {
-                output = &screen;
-                break;
-            }
-        if (!output) {
-            for (const auto &screen : layout)
-                if (screen.desktop.translated(-desktop.topLeft()) == monitor) {
-                    output = &screen;
-                    break;
-                }
-        }
+        const auto *output = compositorScreen(monitor);
         if (!output) {
             failSharing("GNOME 选区所在显示器与 SnapLing 的屏幕布局不匹配，请重新截图。");
             return;
@@ -485,37 +561,37 @@ void WaylandCapture::openCompositorSelector() {
         QElapsedTimer handoff;
         handoff.start();
         auto *reader = new QFutureWatcher<QImage>(this);
-        connect(reader, &QFutureWatcher<QImage>::finished, this, [this, job, reader, frame, handoff]() mutable {
+        const bool reusedPreparedImage = preparedMonitor == monitor && preparedPixels.isStarted();
+        connect(reader, &QFutureWatcher<QImage>::finished, this,
+                [this, job, reader, frame, handoff, fd, canRetry = reusedPreparedImage]() mutable {
             frame.image = reader->result();
-            reader->deleteLater();
-            if (job != generation)
+            if (job != generation) {
+                reader->deleteLater();
                 return;
+            }
+            if (frame.image.isNull() && canRetry) {
+                canRetry = false;
+                reader->setFuture(QtConcurrent::run(&workerPool, [fd] { return readCompositorImage(fd); }));
+                return;
+            }
+            reader->deleteLater();
             if (frame.image.isNull() || !sameLayout(layout, currentScreens())) {
                 failSharing("无法读取 GNOME 选区，或显示器布局已改变，请重新截图。");
                 return;
             }
             compositorPending = false;
             capturePending = false;
+            awaitingEditorReady = compositorProtocol >= 5;
             frame.captureMs = frameWait.elapsed();
             qInfo("gnome_selection_ready pixels=%dx%d handoff_decode_ms=%lld screen=%s",
                   frame.image.width(), frame.image.height(), handoff.elapsed(), qPrintable(frame.screenName));
             emit captured(std::move(frame));
         });
-        reader->setFuture(QtConcurrent::run(&workerPool, [fd] {
-            struct stat info {};
-            if (fstat(fd.fileDescriptor(), &info) != 0 || !S_ISREG(info.st_mode) ||
-                info.st_size <= 0 || info.st_size > 512 * 1024 * 1024)
-                return QImage();
-            QFile file;
-            if (!file.open(fd.fileDescriptor(), QIODevice::ReadOnly, QFileDevice::DontCloseHandle) || !file.seek(0))
-                return QImage();
-            QString error;
-            auto image = decodeCaptureImage(file, error);
-            if (image.isNull())
-                qWarning("gnome_handoff_decode_error=%s", qPrintable(error));
-            return image;
-        }));
+        reader->setFuture(reusedPreparedImage ? preparedPixels
+                                             : QtConcurrent::run(&workerPool, [fd] { return readCompositorImage(fd); }));
     });
+    if (compositorProtocol >= 5)
+        prepareCompositorMonitor();
 }
 void WaylandCapture::lookupScreenshotPermission(std::function<void(QString, QString, QString)> callback) {
     const auto job = generation;
@@ -939,10 +1015,14 @@ void WaylandCapture::failSharing(QString error) {
 void WaylandCapture::resetSharing() {
     resettingPermission = false;
     ++generation;
-    if (compositorPending) {
+    if (compositorPending || awaitingEditorReady) {
         compositorPending = false;
+        awaitingEditorReady = false;
         QDBusConnection::sessionBus().asyncCall(compositorCall("Cancel"), 2500);
     }
+    preparedMonitor = {};
+    preparedPixels = {};
+    compositorFinalReceived = false;
     frameTimer.stop();
     starting = false;
     temporarySharing = false;

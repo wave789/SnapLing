@@ -1,6 +1,7 @@
 #pragma once
 #include "capture/CaptureService.h"
 #include <QPointer>
+#include <QFuture>
 #include <QTimer>
 #include <QElapsedTimer>
 #include <functional>
@@ -35,6 +36,8 @@ class WaylandCapture final : public ICaptureBackend {
     void setCompositorProtocol(int version) {
         compositorProtocol = version;
     }
+    void compositorEditorReady();
+    bool awaitingCompositorEditor() const { return awaitingEditorReady; }
     bool sharing() const {
         return active;
     }
@@ -47,8 +50,11 @@ class WaylandCapture final : public ICaptureBackend {
     void screenshotPermissionReset();
     void screenshotAuthorized();
     void compositorSelectionCancelled();
+    void monitorPrepared(SnapLing::CaptureFrame frame);
+    void compositorInputReady();
   private slots:
     void sessionClosed(const QDBusMessage &message);
+    void compositorCancelled();
 
   private:
     enum class ScreenshotPurpose { Capture, Authorize };
@@ -56,6 +62,8 @@ class WaylandCapture final : public ICaptureBackend {
     void requestScreenshot(ScreenshotPurpose purpose);
     void selectInCompositor();
     void openCompositorSelector();
+    void prepareCompositorMonitor();
+    const CaptureScreen *compositorScreen(const QRectF &monitor) const;
     void lookupScreenshotPermission(std::function<void(QString own, QString host, QString error)> callback);
     void reportScreenshotFailure(ScreenshotPurpose purpose);
     void beginSharing(bool temporary);
@@ -79,6 +87,10 @@ class WaylandCapture final : public ICaptureBackend {
     bool composing = false, allScreens = true;
     bool resettingPermission = false;
     bool compositorPending = false;
+    bool awaitingEditorReady = false;
+    bool compositorFinalReceived = false;
+    QRectF preparedMonitor;
+    QFuture<QImage> preparedPixels;
     Method method = Method::Screenshot;
     int compositorProtocol = -1;
     uint screenCastVersion = 0;

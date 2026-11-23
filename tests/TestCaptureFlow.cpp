@@ -216,8 +216,8 @@ class CompositorSelector : public QObject, protected QDBusContext {
     Q_OBJECT
     Q_CLASSINFO("D-Bus Interface", "io.snapling.Screenshot1")
   public:
-    QDBusMessage pending;
-    int requests = 0, cancellations = 0, versions = 0;
+    QDBusMessage pending, prepared;
+    int requests = 0, cancellations = 0, versions = 0, preparations = 0, acknowledgements = 0;
   public slots:
     uint GetVersion() {
         ++versions;
@@ -228,6 +228,12 @@ class CompositorSelector : public QObject, protected QDBusContext {
         pending = message();
         ++requests;
     }
+    void PrepareMonitor() {
+        setDelayedReply(true);
+        prepared = message();
+        ++preparations;
+    }
+    void EditorReady() { ++acknowledgements; }
     void Cancel() { ++cancellations; }
 };
 class ScreenCastPortal : public QDBusAbstractAdaptor {
@@ -421,7 +427,9 @@ class TestCaptureFlow : public QObject {
         screenCast.desktop = {};
         screenCast.nodeList.clear();
         compositor.pending = {};
+        compositor.prepared = {};
         compositor.requests = compositor.cancellations = compositor.versions = 0;
+        compositor.preparations = compositor.acknowledgements = 0;
         testLayout = captureScreenLayout();
         screenCast.sourceOptions.clear();
         QSettings().remove("wayland/restoreToken");
@@ -1323,6 +1331,68 @@ class TestCaptureFlow : public QObject {
         QTRY_COMPARE(frames.size(), 1);
         QTest::qWait(150);
         QCOMPARE(frames.size(), 1);
+    }
+    void compositorPreparedImageIsReusedOnRelease() {
+        if (!compositorBus.isConnected())
+            QSKIP("使用独立测试总线模拟 GNOME Shell 选择器");
+        auto capture = backend(false);
+        capture->setMethod(WaylandCapture::Method::Compositor);
+        capture->setCompositorProtocol(5);
+        QSignalSpy prepared(capture.get(), &WaylandCapture::monitorPrepared);
+        QSignalSpy frames(capture.get(), &ICaptureBackend::captured);
+        QSignalSpy errors(capture.get(), &ICaptureBackend::failed);
+        capture->capture(CaptureMode::Region);
+        QTRY_COMPARE(compositor.requests, 1);
+        QTRY_COMPARE(compositor.preparations, 1);
+        QFile pixels(images.filePath("desktop.png"));
+        QVERIFY(pixels.open(QIODevice::ReadOnly));
+        const auto monitor = testLayout.first().desktop.toRect();
+        const QVariantList monitorReply{QVariant::fromValue(QDBusUnixFileDescriptor(pixels.handle())),
+                                        monitor.x(), monitor.y(), monitor.width(), monitor.height()};
+        QVERIFY(compositorBus.send(compositor.prepared.createReply(monitorReply)));
+        QTRY_COMPARE(prepared.size(), 1);
+        QVERIFY(frames.isEmpty());
+        const auto warm = qvariant_cast<CaptureFrame>(prepared.first().first());
+        QVERIFY(warm.fullMonitorImage);
+        QVERIFY(!warm.selectionComplete);
+        QVERIFY(warm.selectionViewport.isEmpty());
+        const QRect region(20, 30, 120, 90);
+        auto finalReply = monitorReply;
+        finalReply << region.x() << region.y() << region.width() << region.height();
+        QVERIFY(compositorBus.send(compositor.pending.createReply(finalReply)));
+        QTRY_COMPARE(frames.size(), 1);
+        const auto selected = qvariant_cast<CaptureFrame>(frames.first().first());
+        QCOMPARE(selected.image.cacheKey(), warm.image.cacheKey());
+        QCOMPARE(selected.selectionViewport, QRectF(region));
+        QVERIFY(selected.selectionComplete);
+        QVERIFY(errors.isEmpty());
+        QCOMPARE(compositor.acknowledgements, 0);
+        capture->compositorEditorReady();
+        QTRY_COMPARE(compositor.acknowledgements, 1);
+    }
+    void compositorCancelledAfterReleaseBeforeEditorReady() {
+        if (!compositorBus.isConnected())
+            QSKIP("使用独立测试总线模拟 GNOME Shell 选择器");
+        auto capture = backend(false);
+        capture->setMethod(WaylandCapture::Method::Compositor);
+        capture->setCompositorProtocol(5);
+        QSignalSpy frames(capture.get(), &ICaptureBackend::captured);
+        QSignalSpy cancelled(capture.get(), &WaylandCapture::compositorSelectionCancelled);
+        capture->capture(CaptureMode::Region);
+        QTRY_COMPARE(compositor.requests, 1);
+        QFile pixels(images.filePath("desktop.png"));
+        QVERIFY(pixels.open(QIODevice::ReadOnly));
+        const auto monitor = testLayout.first().desktop.toRect();
+        const QVariantList reply{QVariant::fromValue(QDBusUnixFileDescriptor(pixels.handle())),
+                                 monitor.x(), monitor.y(), monitor.width(), monitor.height(), 20, 30, 120, 90};
+        QVERIFY(compositorBus.send(compositor.pending.createReply(reply)));
+        QTRY_COMPARE(frames.size(), 1);
+        auto signal = QDBusMessage::createSignal("/io/snapling/Screenshot", "io.snapling.Screenshot1", "Cancelled");
+        QVERIFY(compositorBus.send(signal));
+        QTRY_COMPARE(cancelled.size(), 1);
+        capture->compositorEditorReady();
+        QTest::qWait(50);
+        QCOMPARE(compositor.acknowledgements, 0);
     }
     void compositorReleaseOpensToolbarAtSelectedRegion() {
         if (!compositorBus.isConnected())

@@ -88,6 +88,7 @@ SelectionOverlay::SelectionOverlay(CaptureFrame f, CaptureMode m, QWidget *paren
                        .intersected(frame.image.rect());
         selectionReady = !selected.isEmpty();
         if (selectionReady) {
+            compositorPaintPending = true;
             // Build the selected image and toolbar before the Wayland surface can map.
             prepareQuickEditor();
             QTimer::singleShot(0, this, [this] {
@@ -103,6 +104,18 @@ SelectionOverlay::SelectionOverlay(CaptureFrame f, CaptureMode m, QWidget *paren
         selected = frame.image.rect();
         QTimer::singleShot(0, this, &SelectionOverlay::beginQuickEditing);
     }
+}
+bool SelectionOverlay::matchesPreparedFrame(const CaptureFrame &candidate) const {
+    return frame.fullMonitorImage && frame.screenName == candidate.screenName &&
+           frame.desktop == candidate.desktop && frame.image.cacheKey() == candidate.image.cacheKey();
+}
+void SelectionOverlay::completeCompositorSelection(QRectF area) {
+    frame.selectionViewport = area;
+    frame.selectionComplete = true;
+    const auto globalArea = area.translated(frame.desktop.topLeft());
+    selected = frame.pixelRect(globalArea);
+    compositorPaintPending = true;
+    finishSelection();
 }
 void SelectionOverlay::present(QString token, bool activate) {
     // QtWayland 的 requestActivate 会消费此标准环境变量；只在当前激活请求期间传入。
@@ -341,6 +354,11 @@ void SelectionOverlay::paintEvent(QPaintEvent *) {
     if (!painted) {
         painted = true;
         emit ready();
+    }
+    if (compositorPaintPending) {
+        compositorPaintPending = false;
+        // Let the backing store commit the completed selection before releasing the Shell preview.
+        QTimer::singleShot(0, this, &SelectionOverlay::compositorFrameReady);
     }
 }
 void SelectionOverlay::mousePressEvent(QMouseEvent *e) {

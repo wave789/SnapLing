@@ -183,6 +183,15 @@ Application::Application(QObject *p, std::unique_ptr<ICaptureBackend> captureBac
         connect(wayland, &WaylandCapture::compositorSelectionCancelled, this, [this] {
             cancelCapture();
         });
+        connect(wayland, &WaylandCapture::monitorPrepared, this, [this](CaptureFrame frame) {
+            if (!capturing || !captureOverlays.isEmpty())
+                return;
+            if (preparedCaptureOverlay)
+                preparedCaptureOverlay->close();
+            auto session = std::make_shared<EditorSession>(QImage(), settings, config);
+            preparedCaptureOverlay = new SelectionOverlay(std::move(frame), pendingMode,
+                nullptr, session, {}, false);
+        });
         capabilities->setText(capabilities->text() + "\n" + wayland->capabilities());
         auto *regrant = new QPushButton("重新请求截图授权");
         regrant->setObjectName("retryScreenshotPermission");
@@ -270,6 +279,8 @@ Application::Application(QObject *p, std::unique_ptr<ICaptureBackend> captureBac
 }
 Application::~Application() {
     backend->cancel();
+    if (preparedCaptureOverlay)
+        preparedCaptureOverlay->close();
     closeCaptureOverlays();
     consentWindow.reset();
     main.removeEventFilter(this);
@@ -683,7 +694,18 @@ void Application::showCaptureOverlays(CaptureFrame frame) {
         const auto token = activate ? captureActivationToken : QString();
         if (activate)
             captureActivationToken.clear();
-        auto *overlay = new SelectionOverlay(std::move(view), pendingMode, nullptr, session, token, activate);
+        bool waitsForInput = false;
+#ifndef Q_OS_WIN
+        if (auto *wayland = qobject_cast<WaylandCapture *>(backend.get()))
+            waitsForInput = wayland->awaitingCompositorEditor();
+#endif
+        const bool reusePrepared = preparedCaptureOverlay && preparedCaptureOverlay->matchesPreparedFrame(view);
+        auto *overlay = reusePrepared ? preparedCaptureOverlay.data()
+                                     : new SelectionOverlay(view, pendingMode, nullptr, session,
+                                         waitsForInput ? QString() : token, activate && !waitsForInput);
+        if (preparedCaptureOverlay && !reusePrepared)
+            preparedCaptureOverlay->close();
+        preparedCaptureOverlay.clear();
         captureOverlays << overlay;
         connect(overlay, &SelectionOverlay::advancedRequested, this, [this, overlay](auto session) {
             closeCaptureOverlays(overlay);
@@ -704,6 +726,15 @@ void Application::showCaptureOverlays(CaptureFrame frame) {
             captureOverlays.clear();
             cancelCapture();
         });
+#ifndef Q_OS_WIN
+        if (auto *wayland = qobject_cast<WaylandCapture *>(backend.get())) {
+            connect(overlay, &SelectionOverlay::compositorFrameReady, wayland, &WaylandCapture::compositorEditorReady);
+            if (waitsForInput)
+                connect(wayland, &WaylandCapture::compositorInputReady, overlay, [overlay, token, activate] {
+                    overlay->present(token, activate);
+                }, Qt::SingleShotConnection);
+        }
+#endif
         connect(overlay, &SelectionOverlay::ready, this, [this, overlay, compositorSelection] {
             qInfo("%s=%lld screen=%s", compositorSelection ? "trigger_to_quick_edit_ms" : "trigger_to_selection_ms",
                   captureTimer.elapsed(), qPrintable(overlay->captureScreenName()));
@@ -716,6 +747,11 @@ void Application::showCaptureOverlays(CaptureFrame frame) {
                       overlay->width(), overlay->height());
             });
         });
+        if (reusePrepared) {
+            overlay->completeCompositorSelection(view.selectionViewport);
+            overlay->present(waitsForInput ? QString() : token, activate && !waitsForInput);
+            qInfo("compositor_prepared_surface_reused=1 screen=%s", qPrintable(view.screenName));
+        }
     }
 }
 void Application::beginCapture() {
@@ -809,6 +845,10 @@ void Application::cancelCapture() {
         countdown = nullptr;
     }
     backend->cancel();
+    if (preparedCaptureOverlay) {
+        preparedCaptureOverlay->close();
+        preparedCaptureOverlay.clear();
+    }
     finishConsent();
     closeCaptureOverlays();
     restoreWindows();

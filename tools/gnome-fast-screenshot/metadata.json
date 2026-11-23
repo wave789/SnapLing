@@ -3,5 +3,5 @@
   "name": "SnapLing Screenshot Acceleration",
   "description": "Accelerate screenshots and select regions inside GNOME Shell",
   "shell-version": ["48", "49", "50"],
-  "version": 17
+  "version": 18
 }

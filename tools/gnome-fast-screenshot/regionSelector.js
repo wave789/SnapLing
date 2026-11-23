@@ -37,9 +37,10 @@ function sameArea(a, b) {
 }
 
 export class RegionSelector {
-    constructor(ownerPid = null, prepareMonitor = null) {
+    constructor(ownerPid = null, prepareMonitor = null, cancelled = null) {
         this._ownerPid = ownerPid;
         this._prepareMonitor = prepareMonitor;
+        this._cancelled = cancelled;
     }
 
     select() {
@@ -59,6 +60,10 @@ export class RegionSelector {
     cancel() {
         if (this._operation)
             this._finish(this._operation, null);
+        if (this._preview?.grab)
+            Main.popModal(this._preview.grab);
+        if (this._preview?.displayCursorChanged)
+            global.display.set_cursor(Meta.Cursor.DEFAULT);
         this._preview?.overlay.destroy();
         this._preview = null;
     }
@@ -107,11 +112,12 @@ export class RegionSelector {
             for (let index = 0; index < ordered.length; ++index) {
                 if (this._operation !== operation || operation.cancelled)
                     return;
+                operation.hiddenActors.push(...this._hideOwnerActors());
                 // After the first output is visible its shades are part of the stage.
                 // Temporarily remove the selector before freezing later outputs so the
                 // dark selection mask is not baked into their frozen textures.
                 const captureLayers = [operation.snapshotLayer, operation.dim,
-                    operation.selectionPatch, operation.border];
+                    operation.selectionPatch, operation.border, ...operation.handles];
                 const visibleLayers = index > 0 ? captureLayers.filter(actor => actor.visible) : [];
                 for (const actor of visibleLayers)
                     actor.hide();
@@ -207,7 +213,10 @@ export class RegionSelector {
         operation.dim.set_size(global.stage.width, global.stage.height);
         operation.selectionPatch = new Clutter.Actor({clip_to_allocation: true});
         operation.border = new St.Widget({style: 'border: 2px solid #0bd18b;'});
-        for (const actor of [operation.dim, operation.selectionPatch, operation.border]) {
+        operation.handles = Array.from({length: 8}, () => new St.Widget({
+            style: 'background-color:#0bd18b; border:1px solid #123c30;',
+        }));
+        for (const actor of [operation.dim, operation.selectionPatch, operation.border, ...operation.handles]) {
             actor.hide();
             overlay.add_child(actor);
         }
@@ -265,6 +274,24 @@ export class RegionSelector {
         operation.border.show();
     }
 
+    _paintFinalSelection(operation, area) {
+        const left = Math.max(1, area.x - 1);
+        const top = Math.max(1, area.y - 1);
+        const right = Math.min(operation.overlay.width - 1, area.x + area.width + 1);
+        const bottom = Math.min(operation.overlay.height - 1, area.y + area.height + 1);
+        place(operation.border, left, top, right - left, bottom - top);
+        const cx = area.x + area.width / 2;
+        const cy = area.y + area.height / 2;
+        const rightEdge = area.x + area.width;
+        const bottomEdge = area.y + area.height;
+        const points = [[area.x, area.y], [cx, area.y], [rightEdge, area.y],
+            [area.x, cy], [rightEdge, cy], [area.x, bottomEdge], [cx, bottomEdge], [rightEdge, bottomEdge]];
+        operation.handles.forEach((handle, index) => {
+            place(handle, points[index][0] - 4, points[index][1] - 4, 8, 8);
+            handle.show();
+        });
+    }
+
     _queuePaint(operation, area) {
         operation.nextArea = area;
         if (operation.paintLater || sameArea(operation.paintedArea, area))
@@ -277,6 +304,13 @@ export class RegionSelector {
     }
 
     _event(operation, event) {
+        if (operation.cancelled) {
+            if ((event.type() === Clutter.EventType.KEY_PRESS && event.get_key_symbol() === Clutter.KEY_Escape) ||
+                (event.type() === Clutter.EventType.BUTTON_PRESS && event.get_button() === Clutter.BUTTON_SECONDARY))
+                this._cancelled?.();
+            return event.type() === Clutter.EventType.ENTER || event.type() === Clutter.EventType.LEAVE
+                ? Clutter.EVENT_PROPAGATE : Clutter.EVENT_STOP;
+        }
         switch (event.type()) {
         case Clutter.EventType.ENTER:
         case Clutter.EventType.LEAVE:
@@ -300,7 +334,8 @@ export class RegionSelector {
         }
         case Clutter.EventType.MOTION: {
             const [x, y] = event.get_coords();
-            this._queuePaint(operation, this._areaAt(operation, x, y));
+            if (!operation.pendingSelection)
+                this._queuePaint(operation, this._areaAt(operation, x, y));
             break;
         }
         case Clutter.EventType.BUTTON_RELEASE: {
@@ -310,6 +345,7 @@ export class RegionSelector {
             const area = this._areaAt(operation, x, y);
             const snapshot = snapshotAt(operation.snapshots, operation.monitor);
             this._paint(operation, area);
+            this._paintFinalSelection(operation, area);
             if (snapshot)
                 this._finish(operation, {snapshot, area, monitor: operation.monitor});
             else
@@ -349,22 +385,17 @@ export class RegionSelector {
 
         if (result) {
             this._paint(operation, result.area);
-            const area = result.area;
-            const left = Math.max(1, area.x - 1);
-            const top = Math.max(1, area.y - 1);
-            const right = Math.min(operation.overlay.width - 1, area.x + area.width + 1);
-            const bottom = Math.min(operation.overlay.height - 1, area.y + area.height + 1);
-            place(operation.border, left, top, right - left, bottom - top);
+            this._paintFinalSelection(operation, result.area);
         }
         if (operation.paintLater)
             global.compositor.get_laters().remove(operation.paintLater);
-        if (operation.grab)
+        if (operation.grab && !result)
             Main.popModal(operation.grab);
-        if (operation.displayCursorChanged)
+        if (operation.displayCursorChanged && !result)
             global.display.set_cursor(Meta.Cursor.DEFAULT);
         if (result) {
-            operation.overlay.reactive = false;
-            this._preview = {overlay: operation.overlay, snapshot: result.snapshot};
+            this._preview = {overlay: operation.overlay, snapshot: result.snapshot,
+                grab: operation.grab, displayCursorChanged: operation.displayCursorChanged};
         } else {
             operation.overlay?.destroy();
         }

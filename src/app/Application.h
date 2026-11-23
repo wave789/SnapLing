@@ -41,6 +41,7 @@ class Application final : public QObject {
     void showCaptureOverlays(CaptureFrame frame);
     void closeCaptureOverlays(SelectionOverlay *except = nullptr);
     QList<QPointer<SelectionOverlay>> captureOverlays;
+    QPointer<SelectionOverlay> preparedCaptureOverlay;
     QList<QPointer<QWidget>> hiddenWindows;
     bool preparing = false;
     enum class Consent { None, Checking, WaitingForFocus, Requesting };

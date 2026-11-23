@@ -22,6 +22,8 @@ class SelectionOverlay final : public QWidget {
     Canvas *canvasWidget() const { return canvas; }
     std::shared_ptr<EditorSession> session() const { return editing; }
     QString captureScreenName() const { return frame.screenName; }
+    bool matchesPreparedFrame(const CaptureFrame &candidate) const;
+    void completeCompositorSelection(QRectF area);
     void runOcr(bool thenTranslate = false);
     void translate();
     QRectF selection() const {
@@ -36,6 +38,7 @@ class SelectionOverlay final : public QWidget {
     void accepted(QImage image);
     void cancelled();
     void ready();
+    void compositorFrameReady();
     void selectionFinalized();
     void quickEditingStarted();
     void advancedRequested(std::shared_ptr<SnapLing::EditorSession> session);
@@ -95,6 +98,7 @@ class SelectionOverlay final : public QWidget {
     bool hoverSelection = false;
     int zoom = 6;
     bool painted = false;
+    bool compositorPaintPending = false;
     Phase currentPhase = Phase::Selecting;
     std::shared_ptr<EditorSession> editing;
     Canvas *canvas = nullptr;

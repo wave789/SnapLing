@@ -21,7 +21,14 @@ const XML = `<node>
       <arg name="selection_width" type="i" direction="out"/>
       <arg name="selection_height" type="i" direction="out"/>
     </method>
+    <method name="PrepareMonitor">
+      <arg type="h" direction="out"/>
+      <arg type="i" direction="out"/><arg type="i" direction="out"/>
+      <arg type="i" direction="out"/><arg type="i" direction="out"/>
+    </method>
+    <method name="EditorReady"/>
     <method name="Cancel"/>
+    <signal name="Cancelled"/>
   </interface>
 </node>`;
 
@@ -121,7 +128,7 @@ export class ScreenshotBridge {
     }
 
     GetVersion() {
-        return 4;
+        return 5;
     }
 
     async SelectRegionAsync(_params, invocation) {
@@ -135,8 +142,8 @@ export class ScreenshotBridge {
         }
 
         const request = {sender: invocation.get_sender(), selector: null, cancelled: false, images: new Map()};
+        request.previewReady = new Promise(resolve => { request.resolvePreview = resolve; });
         this._pending = request;
-        let io;
         try {
             let executable;
             let pid;
@@ -164,7 +171,12 @@ export class ScreenshotBridge {
                 this._cancel(request);
                 return GLib.SOURCE_REMOVE;
             });
-            request.selector = new RegionSelector(pid, (snapshot, monitor) => this._prepareImage(request, snapshot, monitor));
+            request.selector = new RegionSelector(pid,
+                (snapshot, monitor) => this._prepareImage(request, snapshot, monitor),
+                () => {
+                    Gio.DBus.session.emit_signal(request.sender, PATH, IFACE, 'Cancelled', null);
+                    this._cancel(request);
+                });
             const selection = await request.selector.select();
             if (!selection || request.cancelled) {
                 this._replyCancelled(invocation);
@@ -174,7 +186,6 @@ export class ScreenshotBridge {
             const image = this._prepareImage(request, selection.snapshot, selection.monitor);
             const waitStart = GLib.get_monotonic_time();
             await image.ready;
-            io = image.stream;
             const {monitor, area} = selection;
             const bounds = [monitor.x, monitor.y, monitor.width, monitor.height,
                 area.x - monitor.x, area.y - monitor.y, area.width, area.height];
@@ -183,12 +194,9 @@ export class ScreenshotBridge {
                 this._replyCancelled(invocation);
                 return;
             }
-            io.seek(0, GLib.SeekType.SET, null);
-            const fds = Gio.UnixFDList.new();
-            const handle = fds.append(io.get_input_stream().get_fd());
             this._startHandoff(request, pid, selection.monitor);
             invocation.return_value_with_unix_fd_list(
-                new GLib.Variant('(hiiiiiiii)', [handle, ...bounds]), fds);
+                new GLib.Variant('(hiiiiiiii)', [0, ...bounds]), image.fds);
         } catch (error) {
             this._clearHandoff();
             if (request.cancelled) {
@@ -205,6 +213,7 @@ export class ScreenshotBridge {
             if (request.timeout)
                 GLib.Source.remove(request.timeout);
             this._pending = null;
+            request.resolvePreview(null);
             for (const image of request.images.values())
                 image.ready.finally(() => image.stream?.close(null)).catch(() => {});
 
@@ -231,10 +240,37 @@ export class ScreenshotBridge {
             image.stream = stream;
             file.delete(null);
             await writeMonitor({snapshot, monitor, area: monitor}, stream.get_output_stream());
+            stream.seek(0, GLib.SeekType.SET, null);
+            image.fds = Gio.UnixFDList.new();
+            image.fds.append(stream.get_input_stream().get_fd());
+            request.resolvePreview({image, monitor});
         });
         // A prepared image may fail before the user releases the mouse.
         image.ready.catch(() => {});
         return image;
+    }
+
+    async PrepareMonitorAsync(_params, invocation) {
+        const request = this._pending;
+        if (!request || request.sender !== invocation.get_sender()) {
+            invocation.return_dbus_error(`${IFACE}.NotAllowed`, 'No selection belongs to this connection');
+            return;
+        }
+        request.prefetchRequested = true;
+        const preview = await request.previewReady;
+        if (!preview || request.cancelled) {
+            this._replyCancelled(invocation);
+            return;
+        }
+        const {image, monitor} = preview;
+        invocation.return_value_with_unix_fd_list(new GLib.Variant('(hiiii)',
+            [0, monitor.x, monitor.y, monitor.width, monitor.height]), image.fds);
+    }
+
+    EditorReadyAsync(_params, invocation) {
+        if (this._handoff?.request.sender === invocation.get_sender())
+            this._clearHandoff();
+        invocation.return_value(new GLib.Variant('()', []));
     }
 
     CancelAsync(_params, invocation) {
@@ -253,6 +289,7 @@ export class ScreenshotBridge {
         if (!request)
             return;
         request.cancelled = true;
+        request.resolvePreview(null);
         if (this._handoff?.request === request)
             this._clearHandoff();
         else
@@ -262,7 +299,7 @@ export class ScreenshotBridge {
     _startHandoff(request, pid, monitor) {
         const handoff = {request, pid, monitor, timeout: 0};
         this._handoff = handoff;
-        handoff.timeout = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 1500, () => {
+        handoff.timeout = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 5000, () => {
             handoff.timeout = 0;
             this._clearHandoff();
             return GLib.SOURCE_REMOVE;
@@ -284,17 +321,15 @@ export class ScreenshotBridge {
             output.width !== monitor.width || output.height !== monitor.height)
             return;
 
-        try {
-            this._backdrop?.destroy();
-            const backdrop = request.selector.setEditorBackdrop(actor, monitor);
-            this._backdrop = backdrop;
-            backdrop?.connect('destroy', () => {
-                if (this._backdrop === backdrop)
-                    this._backdrop = null;
-            });
-        } finally {
+        this._backdrop?.destroy();
+        const backdrop = request.selector.setEditorBackdrop(actor, monitor);
+        this._backdrop = backdrop;
+        backdrop?.connect('destroy', () => {
+            if (this._backdrop === backdrop)
+                this._backdrop = null;
+        });
+        if (!request.prefetchRequested)
             this._clearHandoff();
-        }
     }
 
     _clearHandoff() {
